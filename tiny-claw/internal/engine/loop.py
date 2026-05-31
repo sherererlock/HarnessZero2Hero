@@ -7,15 +7,18 @@ from ..schema.message import Message, Role
 class AgentEngine:
     """AgentEngine 是微型 OS 的核心驱动"""
     
-    def __init__(self, provider: LLMProvider, registry: Registry, work_dir: str):
+    def __init__(self, provider: LLMProvider, registry: Registry, work_dir: str, enable_thinking: bool = False):
         self.provider = provider
         self.registry = registry
         # WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
         self.work_dir = work_dir
-
+        self.enable_thinking = enable_thinking
+        
     def run(self, user_prompt: str) -> None:
         """Run 启动 Agent 的生命周期"""
         logging.info(f"[Engine] 引擎启动，锁定工作区: {self.work_dir}")
+        if self.enable_thinking:
+            logging.info("[Engine] 慢思考模式已开启")
         
         # 1. 初始化会话的 Context (上下文内存)
         # 在真实的场景中，这里会由动态 Prompt 组装器加载 AGENTS.md。目前我们先硬编码。
@@ -38,21 +41,32 @@ class AgentEngine:
             
             # 获取当前挂载的所有工具定义
             available_tools = self.registry.get_available_tools()
-            
+
+            if self.enable_thinking:
+                logging.info("[Engine][Phase: 1] 剥夺工具访问权限，强制进入慢思考")
+                try:
+                    think_resp = self.provider.generate(context_history, None)
+                    if think_resp.content:
+                        logging.info(f"🤖 模型: {think_resp.content}")
+                        context_history.append(think_resp)
+                except Exception as e:
+                    logging.error(f"Thinking 阶段生成失败: {e}")
+
             # 向大模型发起推理请求 (包含 Reasoning)
-            logging.info("[Engine] 正在思考 (Reasoning)...")
+            logging.info("[Engine][Phase: 2] 恢复工具挂载，等待模型采取行动......")
+
             try:
                 # 注意：Python 中不需要显式传递 context，除非有特殊需求
                 response_msg = self.provider.generate(context_history, available_tools)
             except Exception as e:
-                raise RuntimeError(f"模型生成失败: {e}")
+                raise RuntimeError(f"Action 阶段生成失败: {e}")
 
             # 将模型的响应完整追加到上下文历史中
             context_history.append(response_msg)
             
             # 如果模型回复了纯文本，打印出来 (这通常是它的思考过程，或是最终结果)
             if response_msg.content:
-                print(f"🤖 模型: {response_msg.content}")
+                logging.info(f"🤖 模型: {response_msg.content}")
                 
             # 3. 退出条件判断
             # 如果模型没有请求任何工具调用，说明它认为任务已经完成，跳出循环。
