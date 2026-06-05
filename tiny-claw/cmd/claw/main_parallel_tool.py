@@ -20,6 +20,8 @@ def main() -> None:
             new_bash_tool,
             new_edit_file_tool,
         ],
+
+        enable_thinking=False,
     )
 
 

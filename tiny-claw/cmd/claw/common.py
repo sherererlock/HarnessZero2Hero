@@ -26,6 +26,9 @@ def configure_logging() -> None:
         format="%(asctime)s [%(levelname)s] %(message)s",
         datefmt="%Y/%m/%d %H:%M:%S",
     )
+    # 保留业务日志，同时压低第三方 HTTP 客户端的请求日志噪音。
+    for logger_name in ("httpx", "httpcore", "openai"):
+        logging.getLogger(logger_name).setLevel(logging.WARNING)
 
 
 def build_engine(
