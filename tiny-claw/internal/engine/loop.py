@@ -1,5 +1,6 @@
 import logging
-from typing import List
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Optional
 from ..provider.interface import LLMProvider
 from ..tools.registry import Registry
 from ..schema.message import Message, Role
@@ -75,25 +76,35 @@ class AgentEngine:
                 break
                 
             # 4. 执行行动 (Action) 与 获取观察结果 (Observation)
-            logging.info(f"[Engine] 模型请求调用 {len(response_msg.tool_calls)} 个工具...")
-            for tool_call in response_msg.tool_calls:
-                logging.info(f"  -> 🛠️ 执行工具: {tool_call.name}, 参数: {tool_call.arguments}")
-                
-                # 通过 Registry 路由并执行底层工具
-                result = self.registry.execute(tool_call)
-                
+            logging.info("[Engine] 模型请求并发调用 %d 个工具...", len(response_msg.tool_calls))
+            
+            observation_msgs: List[Optional[Message]] = [None] * len(response_msg.tool_calls)
+
+            def execute_tool(idx: int, call) -> None:
+                logging.info("  -> [Worker-%d] 🛠️ 触发并行执行: %s", idx, call.name)
+                result = self.registry.execute(call)
                 if result.is_error:
-                    logging.info(f"  -> ❌ 工具执行报错: {result.output}")
+                    logging.error("  -> [Worker-%d] ❌ 工具执行报错: %s", idx, result.output)
                 else:
-                    logging.info(f"  -> ✅ 工具执行成功 (返回 {len(result.output)} 字节)")
-                    
-                # 将工具执行的观察结果 (Observation) 封装为 User Message 追加到上下文中
-                # 注意：ToolCallID 必须携带！这是维系大模型推理链条的关键
-                observation_msg = Message(
+                    logging.info("  -> [Worker-%d] ✅ 工具执行成功 (返回 %d 字节)", idx, len(result.output))
+
+                observation_msgs[idx] = Message(
                     role=Role.USER,
                     content=result.output,
-                    tool_call_id=tool_call.id
+                    tool_call_id=call.id,
                 )
-                context_history.append(observation_msg)
-            
+
+            with ThreadPoolExecutor(max_workers=len(response_msg.tool_calls)) as executor:
+                futures = [
+                    executor.submit(execute_tool, idx, tool_call)
+                    for idx, tool_call in enumerate(response_msg.tool_calls)
+                ]
+                for future in futures:
+                    future.result()
+
+            logging.info("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
+            for obs in observation_msgs:
+                if obs is not None:
+                    context_history.append(obs)
+
             # 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
