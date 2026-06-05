@@ -3,6 +3,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 from ..provider.interface import LLMProvider
 from ..tools.registry import Registry
+from .reportor import Reporter
 from ..schema.message import Message, Role
 
 class AgentEngine:
@@ -15,7 +16,7 @@ class AgentEngine:
         self.work_dir = work_dir
         self.enable_thinking = enable_thinking
         
-    def run(self, user_prompt: str) -> None:
+    def run(self, user_prompt: str, reporter: Reporter = None) -> Optional[Exception]:
         """Run 启动 Agent 的生命周期"""
         logging.info(f"[Engine] 引擎启动，锁定工作区: {self.work_dir}")
         if self.enable_thinking:
@@ -44,6 +45,9 @@ class AgentEngine:
             available_tools = self.registry.get_available_tools()
 
             if self.enable_thinking:
+                if reporter:
+                    reporter.on_thinking()
+
                 logging.info("[Engine][Phase: 1] 剥夺工具访问权限，强制进入慢思考")
                 try:
                     think_resp = self.provider.generate(context_history, None)
@@ -51,7 +55,7 @@ class AgentEngine:
                         logging.info(f"🤖 模型: {think_resp.content}")
                         context_history.append(think_resp)
                 except Exception as e:
-                    logging.error(f"Thinking 阶段生成失败: {e}")
+                    return RuntimeError(f"Thinking 阶段生成失败: {e}")
 
             # 向大模型发起推理请求 (包含 Reasoning)
             logging.info("[Engine][Phase: 2] 恢复工具挂载，等待模型采取行动......")
@@ -60,10 +64,13 @@ class AgentEngine:
                 # 注意：Python 中不需要显式传递 context，除非有特殊需求
                 response_msg = self.provider.generate(context_history, available_tools)
             except Exception as e:
-                raise RuntimeError(f"Action 阶段生成失败: {e}")
+                return RuntimeError(f"Action 阶段生成失败: {e}")
 
             # 将模型的响应完整追加到上下文历史中
             context_history.append(response_msg)
+
+            if response_msg.content != "" and reporter is not None:
+                reporter.on_message(response_msg.content)
             
             # 如果模型回复了纯文本，打印出来 (这通常是它的思考过程，或是最终结果)
             if response_msg.content:
@@ -82,7 +89,17 @@ class AgentEngine:
 
             def execute_tool(idx: int, call) -> None:
                 logging.info("  -> [Worker-%d] 🛠️ 触发并行执行: %s", idx, call.name)
+                if reporter:
+                    reporter.on_tool_call(call.name, call.arguments)
+
                 result = self.registry.execute(call)
+                if reporter:
+                    displayOutput = result.output
+                    if len(displayOutput) > 200:
+                        displayOutput = displayOutput[:200] + "...(已截断，实际长度: %d)" % len(displayOutput)
+
+                    reporter.on_tool_result(call.name, displayOutput, result.is_error)
+
                 if result.is_error:
                     logging.error("  -> [Worker-%d] ❌ 工具执行报错: %s", idx, result.output)
                 else:
@@ -108,3 +125,5 @@ class AgentEngine:
                     context_history.append(obs)
 
             # 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
+
+        return None

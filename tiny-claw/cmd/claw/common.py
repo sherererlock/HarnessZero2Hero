@@ -64,8 +64,7 @@ def run_prompt_main(
         enable_thinking=enable_thinking,
     )
 
-    try:
-        engine.run(prompt)
-    except Exception as exc:
-        logging.error("引擎运行崩溃: %s", exc)
-        raise SystemExit(1) from exc
+    err = engine.run(prompt)
+    if err is not None:
+        logging.error("引擎运行崩溃: %s", err)
+        raise SystemExit(1) from err

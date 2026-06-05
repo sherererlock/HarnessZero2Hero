@@ -37,6 +37,8 @@ class BashTool(BaseTool):
     def execute(self, args: Any) -> str:
         command = self._extract_command(args)
 
+        # 打印输入参数args
+        print(f"执行bash命令的输入参数: {args}")
         try:
             completed = subprocess.run(
                 self._shell_command(command),
