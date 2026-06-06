@@ -195,16 +195,22 @@ class FeishuReporter(Reporter):
         self.client.im.v1.message.create(request)
 
     def on_thinking(self) -> None:
-        self.send_msg("🤔 模型正在慢思考 (Thinking)...")
+        # self.send_msg("🤔 模型正在慢思考 (Thinking)...")
+        logging.info("on_thinking 🤔 模型正在慢思考 (Thinking)")
+
+
 
     def on_tool_call(self, tool_name: str, args: str) -> None:
-        self.send_msg(f"🛠️ 正在执行工具：{tool_name}\n参数：{args}")
+        # self.send_msg(f"🛠️ 正在执行工具：{tool_name}\n参数：{args}")
+        logging.info(f"on_tool_call 🛠️ 正在执行工具：{tool_name}\n参数：{args}")
 
     def on_tool_result(self, tool_name: str, result: str, is_error: bool) -> None:
         if is_error:
             self.send_msg(f"⚠️ 执行报错 ({tool_name})：\n{result}")
+            logging.error(f"on_tool_result ⚠️ 执行报错 ({tool_name})：\n{result}")
             return
-        self.send_msg(f"✅ 执行成功 ({tool_name})")
+        # self.send_msg(f"✅ 执行成功 ({tool_name})")
+        logging.info(f"on_tool_result ✅ 执行成功 ({tool_name})")
 
     def on_message(self, content: str) -> None:
         self.send_msg(content)
