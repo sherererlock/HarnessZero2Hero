@@ -41,7 +41,7 @@ class _WebSocketEventHandler:
         if isinstance(payload, bytes):
             payload = payload.decode("utf-8")
         event = json.loads(payload)
-        self.bot.handle_message_event(event)
+        self.bot.dispatch_event(event)
         return None
 
 
@@ -109,16 +109,19 @@ class FeishuBot:
         verify_token = os.getenv("FEISHU_VERIFY_TOKEN", "")
         return self.create_event_dispatcher(verify_token, encrypt_key)
 
+    def dispatch_event(self, event: Any) -> None:
+        event_body = _read_field(event, "event") or event
+        message = _read_field(event_body, "message")
+        if message is None:
+            logging.debug("[Feishu] 忽略非消息事件: %r", event)
+            return
+        self.handle_message_event(event)
+
     def create_event_dispatcher(self, verify_token: str, encrypt_key: str):
         del verify_token, encrypt_key
 
         def dispatcher(event: Any) -> None:
-            event_body = _read_field(event, "event") or event
-            message = _read_field(event_body, "message")
-            if message is None:
-                logging.debug("[Feishu] 忽略非消息事件: %r", event)
-                return
-            self.handle_message_event(event)
+            self.dispatch_event(event)
 
         return dispatcher
 
@@ -152,6 +155,7 @@ class FeishuBot:
 
     StartWebSocket = start_websocket
     GetEventDispatcher = get_event_dispatcher
+    dispatchEvent = dispatch_event
     createEventDispatcher = create_event_dispatcher
     handleMessageEvent = handle_message_event
     handleAgentRun = handle_agent_run

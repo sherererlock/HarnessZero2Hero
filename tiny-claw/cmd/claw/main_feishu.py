@@ -57,7 +57,7 @@ def main() -> None:
             new_bash_tool,
             new_edit_file_tool,
         ],
-        enable_thinking=True,
+        enable_thinking=False,
     )
     bot = new_feishu_bot(engine)
     logging.info("go-tiny-claw 飞书长连接模式启动中")
