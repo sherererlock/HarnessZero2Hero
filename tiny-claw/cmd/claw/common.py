@@ -1,7 +1,7 @@
 import logging
 import os
 import sys
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Optional
 
 # 让直接运行脚本时也能找到项目内模块。
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -10,6 +10,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from internal.engine.loop import AgentEngine
+from internal.engine.reportor import Reporter
 from internal.provider.openai import new_zhipu_openai_provider
 from internal.tools.Bash import new_bash_tool
 from internal.tools.edit_file import new_edit_file_tool
@@ -37,6 +38,7 @@ def build_engine(
     enable_thinking: bool = False,
 ) -> AgentEngine:
     work_dir = os.getcwd()
+    work_dir += "/workspace"
     llm_provider = new_zhipu_openai_provider(model)
     registry = new_registry()
 
@@ -65,6 +67,26 @@ def run_prompt_main(
     )
 
     err = engine.run(prompt)
+    if err is not None:
+        logging.error("引擎运行崩溃: %s", err)
+        raise SystemExit(1) from err
+
+
+def run_prompt_main_with_reporter(
+    prompt: str,
+    tool_factories: Iterable[ToolFactory],
+    reporter: Optional[Reporter],
+    model: str = "xiaomi/mimo-v2.5",
+    enable_thinking: bool = True,
+) -> None:
+    configure_logging()
+    engine = build_engine(
+        tool_factories=tool_factories,
+        model=model,
+        enable_thinking=enable_thinking,
+    )
+
+    err = engine.run(prompt, reporter=reporter)
     if err is not None:
         logging.error("引擎运行崩溃: %s", err)
         raise SystemExit(1) from err

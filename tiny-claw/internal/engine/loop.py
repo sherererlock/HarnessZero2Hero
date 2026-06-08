@@ -1,6 +1,7 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
+from ..context.composer import PromptComposer
 from ..provider.interface import LLMProvider
 from ..tools.registry import Registry
 from .reportor import Reporter
@@ -14,6 +15,7 @@ class AgentEngine:
         self.registry = registry
         # WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
         self.work_dir = work_dir
+        self.prompt_composer = PromptComposer(work_dir)
         self.enable_thinking = enable_thinking
         
     def run(self, user_prompt: str, reporter: Reporter = None) -> Optional[Exception]:
@@ -22,13 +24,13 @@ class AgentEngine:
         if self.enable_thinking:
             logging.info("[Engine] 慢思考模式已开启")
         
+        system_prompt = self.prompt_composer.build()
+
+        logging.info(f"[Engine] 系统提示: {system_prompt.content}")
+        
         # 1. 初始化会话的 Context (上下文内存)
-        # 在真实的场景中，这里会由动态 Prompt 组装器加载 AGENTS.md。目前我们先硬编码。
         context_history: List[Message] = [
-            Message(
-                role=Role.SYSTEM,
-                content="You are go-tiny-claw, an expert coding assistant. You have full access to tools in the workspace."
-            ),
+            self.prompt_composer.build(),
             Message(
                 role=Role.USER,
                 content=user_prompt
