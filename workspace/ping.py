@@ -22,6 +22,12 @@ class PingHandler(http.server.BaseHTTPRequestHandler):
                 "message": "pong"
             }
             self._send_json_response(response)
+        elif self.path == "/":
+            response = {
+                "code": 200,
+                "message": "HTTP Ping 服务运行中"
+            }
+            self._send_json_response(response)
         else:
             response = {
                 "code": 404,
