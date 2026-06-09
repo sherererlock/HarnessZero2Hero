@@ -6,36 +6,29 @@ from ..provider.interface import LLMProvider
 from ..tools.registry import Registry
 from .reportor import Reporter
 from ..schema.message import Message, Role
+from .session import Session
 
 class AgentEngine:
     """AgentEngine 是微型 OS 的核心驱动"""
     
-    def __init__(self, provider: LLMProvider, registry: Registry, work_dir: str, enable_thinking: bool = False):
+    def __init__(self, provider: LLMProvider, registry: Registry, enable_thinking: bool = False):
         self.provider = provider
         self.registry = registry
-        # WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
-        self.work_dir = work_dir
-        self.prompt_composer = PromptComposer(work_dir)
+        
         self.enable_thinking = enable_thinking
         
-    def run(self, user_prompt: str, reporter: Reporter = None) -> Optional[Exception]:
+    def run(self, user_prompt: str, session: Session = None, reporter: Reporter = None) -> Optional[Exception]:
         """Run 启动 Agent 的生命周期"""
-        logging.info(f"[Engine] 引擎启动，锁定工作区: {self.work_dir}")
+        if session is None:
+            return ValueError("session 不能为空")
+
+        logging.info(f"[Engine] 引擎启动， 会话：{session.id} 锁定工作区: {session.work_dir}")
         if self.enable_thinking:
             logging.info("[Engine] 慢思考模式已开启")
         
-        system_prompt = self.prompt_composer.build()
-
-        logging.info(f"[Engine] 系统提示: {system_prompt.content}")
-        
-        # 1. 初始化会话的 Context (上下文内存)
-        context_history: List[Message] = [
-            self.prompt_composer.build(),
-            Message(
-                role=Role.USER,
-                content=user_prompt
-            )
-        ]
+        prompt_composer = PromptComposer(session.work_dir)
+        system_prompt = prompt_composer.build()
+        session.append(Message(role=Role.USER, content=user_prompt))
         
         turn_count = 0
         # 2. The Main Loop: 心跳开始 (标准的 ReAct 循环)
@@ -46,6 +39,12 @@ class AgentEngine:
             # 获取当前挂载的所有工具定义
             available_tools = self.registry.get_available_tools()
 
+            working_memory = session.get_working_memory(6)
+            context_history = [
+                system_prompt
+            ]
+            context_history.extend(working_memory)
+            
             if self.enable_thinking:
                 if reporter:
                     reporter.on_thinking()
@@ -56,6 +55,7 @@ class AgentEngine:
                     if think_resp.content:
                         logging.info(f"🤖 模型: {think_resp.content}")
                         context_history.append(think_resp)
+                        session.append(think_resp)
                 except Exception as e:
                     return RuntimeError(f"Thinking 阶段生成失败: {e}")
 
@@ -70,6 +70,7 @@ class AgentEngine:
 
             # 将模型的响应完整追加到上下文历史中
             context_history.append(response_msg)
+            session.append(response_msg)
 
             if response_msg.content != "" and reporter is not None:
                 reporter.on_message(response_msg.content)
@@ -122,10 +123,15 @@ class AgentEngine:
                     future.result()
 
             logging.info("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
+            completed_observations: List[Message] = []
             for obs in observation_msgs:
                 if obs is not None:
                     context_history.append(obs)
+                    completed_observations.append(obs)
 
+            if completed_observations:
+                session.append(*completed_observations)
+            
             # 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
 
         return None

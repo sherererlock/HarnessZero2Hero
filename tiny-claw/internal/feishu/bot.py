@@ -11,6 +11,7 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from internal.engine.reportor import Reporter
+from internal.engine.session import GlobalSessionMgr
 
 try:
     import lark_oapi as lark
@@ -149,7 +150,9 @@ class FeishuBot:
 
     def handle_agent_run(self, chat_id: str, prompt: str) -> None:
         reporter = FeishuReporter(client=self.client, chat_id=chat_id)
-        err = self.engine.run(prompt, reporter)
+        work_dir = os.path.join(os.getcwd(), "workspace")
+        session = GlobalSessionMgr.get_or_create(chat_id, work_dir)
+        err = self.engine.run(prompt, session=session, reporter=reporter)
         if err is not None:
             reporter.send_msg(f"❌ Agent 运行崩溃: {err}")
 
