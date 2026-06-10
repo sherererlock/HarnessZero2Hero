@@ -2,6 +2,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 from ..context.composer import PromptComposer
+from ..context.compactor import Compactor
 from ..provider.interface import LLMProvider
 from ..tools.registry import Registry
 from .reportor import Reporter
@@ -14,6 +15,7 @@ class AgentEngine:
     def __init__(self, provider: LLMProvider, registry: Registry, enable_thinking: bool = False):
         self.provider = provider
         self.registry = registry
+        self.compactor = Compactor(max_chars=3000, retain_last_msgs=6)
         
         self.enable_thinking = enable_thinking
         
@@ -45,16 +47,18 @@ class AgentEngine:
             ]
             context_history.extend(working_memory)
             
+            compactedContext = self.compactor.compact(context_history)
+
             if self.enable_thinking:
                 if reporter:
                     reporter.on_thinking()
 
                 logging.info("[Engine][Phase: 1] 剥夺工具访问权限，强制进入慢思考")
                 try:
-                    think_resp = self.provider.generate(context_history, None)
+                    think_resp = self.provider.generate(compactedContext, None)
                     if think_resp.content:
                         logging.info(f"🤖 模型: {think_resp.content}")
-                        context_history.append(think_resp)
+                        compactedContext.append(think_resp)
                         session.append(think_resp)
                 except Exception as e:
                     return RuntimeError(f"Thinking 阶段生成失败: {e}")
@@ -64,12 +68,12 @@ class AgentEngine:
 
             try:
                 # 注意：Python 中不需要显式传递 context，除非有特殊需求
-                response_msg = self.provider.generate(context_history, available_tools)
+                response_msg = self.provider.generate(compactedContext, available_tools)
             except Exception as e:
                 return RuntimeError(f"Action 阶段生成失败: {e}")
 
             # 将模型的响应完整追加到上下文历史中
-            context_history.append(response_msg)
+            compactedContext.append(response_msg)
             session.append(response_msg)
 
             if response_msg.content != "" and reporter is not None:
@@ -126,7 +130,7 @@ class AgentEngine:
             completed_observations: List[Message] = []
             for obs in observation_msgs:
                 if obs is not None:
-                    context_history.append(obs)
+                    compactedContext.append(obs)
                     completed_observations.append(obs)
 
             if completed_observations:
