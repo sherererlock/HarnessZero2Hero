@@ -84,6 +84,7 @@ def build_engine_for_work_dir(
     tool_factories: Iterable[ToolFactory],
     model: str = "xiaomi/mimo-v2.5",
     enable_thinking: bool = False,
+    plan_mode: bool = False,
 ) -> AgentEngine:
     llm_provider = new_zhipu_openai_provider(model)
     registry = new_registry()
@@ -95,6 +96,7 @@ def build_engine_for_work_dir(
         provider=llm_provider,
         registry=registry,
         enable_thinking=enable_thinking,
+        PlanMode=plan_mode,
     )
 
 
@@ -102,6 +104,7 @@ def build_engine(
     tool_factories: Iterable[ToolFactory],
     model: str = "xiaomi/mimo-v2.5",
     enable_thinking: bool = False,
+    plan_mode: bool = False,
 ) -> AgentEngine:
     work_dir = resolve_work_dir()
     return build_engine_for_work_dir(
@@ -109,6 +112,7 @@ def build_engine(
         tool_factories=tool_factories,
         model=model,
         enable_thinking=enable_thinking,
+        plan_mode=plan_mode,
     )
 
 
@@ -117,12 +121,14 @@ def run_prompt_main(
     tool_factories: Iterable[ToolFactory],
     model: str = "xiaomi/mimo-v2.5",
     enable_thinking: bool = True,
+    plan_mode: bool = False,
 ) -> None:
     configure_logging()
     engine = build_engine(
         tool_factories=tool_factories,
         model=model,
         enable_thinking=enable_thinking,
+        plan_mode=plan_mode,
     )
     session = new_cli_session()
 
@@ -138,12 +144,14 @@ def run_prompt_main_with_reporter(
     reporter: Optional[Reporter],
     model: str = "xiaomi/mimo-v2.5",
     enable_thinking: bool = True,
+    plan_mode: bool = False,
 ) -> None:
     configure_logging()
     engine = build_engine(
         tool_factories=tool_factories,
         model=model,
         enable_thinking=enable_thinking,
+        plan_mode=plan_mode,
     )
     session = new_cli_session()
 

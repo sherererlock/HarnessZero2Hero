@@ -12,11 +12,11 @@ from .session import Session
 class AgentEngine:
     """AgentEngine 是微型 OS 的核心驱动"""
     
-    def __init__(self, provider: LLMProvider, registry: Registry, enable_thinking: bool = False):
+    def __init__(self, provider: LLMProvider, registry: Registry, enable_thinking: bool = False, PlanMode: bool = None):
         self.provider = provider
         self.registry = registry
+        self.PlanMode = PlanMode
         self.compactor = Compactor(max_chars=3000, retain_last_msgs=6)
-        
         self.enable_thinking = enable_thinking
         
     def run(self, user_prompt: str, session: Session = None, reporter: Reporter = None) -> Optional[Exception]:
@@ -28,7 +28,7 @@ class AgentEngine:
         if self.enable_thinking:
             logging.info("[Engine] 慢思考模式已开启")
         
-        prompt_composer = PromptComposer(session.work_dir)
+        prompt_composer = PromptComposer(session.work_dir, self.PlanMode)
         system_prompt = prompt_composer.build()
         session.append(Message(role=Role.USER, content=user_prompt))
         
