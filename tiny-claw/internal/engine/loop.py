@@ -3,11 +3,13 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import List, Optional
 from ..context.composer import PromptComposer
 from ..context.compactor import Compactor
+from ..context.recovery import RecoveryManager
 from ..provider.interface import LLMProvider
 from ..tools.registry import Registry
 from .reportor import Reporter
 from ..schema.message import Message, Role
 from .session import Session
+
 
 class AgentEngine:
     """AgentEngine 是微型 OS 的核心驱动"""
@@ -18,6 +20,7 @@ class AgentEngine:
         self.PlanMode = PlanMode
         self.compactor = Compactor(max_chars=3000, retain_last_msgs=6)
         self.enable_thinking = enable_thinking
+        self.recovery_manager = RecoveryManager()
         
     def run(self, user_prompt: str, session: Session = None, reporter: Reporter = None) -> Optional[Exception]:
         """Run 启动 Agent 的生命周期"""
@@ -100,8 +103,16 @@ class AgentEngine:
                     reporter.on_tool_call(call.name, call.arguments)
 
                 result = self.registry.execute(call)
+
+                finalOutput = result.output
+                if result.is_error:
+                    finalOutput = self.recovery_manager.analyze_and_inject(call.name, result.output)
+                    logging.info(f"  -> [Worker-%idx] 修复后的输出: {finalOutput}")
+                else:
+                    logging.error(f"  -> [Worker-%d] 工具输出: {finalOutput}")
+                    
                 if reporter:
-                    displayOutput = result.output
+                    displayOutput = finalOutput
                     if len(displayOutput) > 200:
                         displayOutput = displayOutput[:200] + "...(已截断，实际长度: %d)" % len(displayOutput)
 

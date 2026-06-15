@@ -69,6 +69,7 @@ class ToolRegistry(Registry):
         try:
             output = tool.execute(call.arguments)
         except Exception as exc:
+            logging.error(f"[Registry] ❌  工具调用失败: {call.name} - {exc}")
             return ToolResult(
                 tool_call_id=call.id,
                 output=f"Error executing {call.name}: {exc}",

@@ -38,7 +38,7 @@ class BashTool(BaseTool):
         command = self._extract_command(args)
 
         # 打印输入参数args
-        print(f"执行bash命令的输入参数: {args}")
+        print(f"[BashTool] 执行bash命令的输入参数: {args}")
         try:
             completed = subprocess.run(
                 self._shell_command(command),
@@ -48,6 +48,7 @@ class BashTool(BaseTool):
                 timeout=TIMEOUT_SECONDS,
                 check=False,
             )
+
         except subprocess.TimeoutExpired as exc:
             timeout_output = self._combine_output(exc.stdout, exc.stderr)
             return (
@@ -55,10 +56,14 @@ class BashTool(BaseTool):
                 + "\n[警告: 命令执行超时(30s)，已被系统强制终止。如果是启动常驻服务，请尝试将其转入后台。]"
             ).lstrip("\n")
 
+        except Exception as exc:
+            return f"[BashTool] [❌]  执行报错: {exc}"
+
+
         output = self._combine_output(completed.stdout, completed.stderr)
 
         if completed.returncode != 0:
-            return f"执行报错: exit code {completed.returncode}\n输出:\n{output}"
+            raise Exception(f"[BashTool] [❌]  执行报错: exit code {completed.returncode}\n输出:\n{output}")
 
         if output == "":
             return "命令执行成功，无终端输出。"
