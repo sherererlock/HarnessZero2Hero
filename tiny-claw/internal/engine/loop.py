@@ -9,7 +9,7 @@ from ..tools.registry import Registry
 from .reportor import Reporter
 from ..schema.message import Message, Role
 from .session import Session
-
+from .reminder import ReminderInjector
 
 class AgentEngine:
     """AgentEngine 是微型 OS 的核心驱动"""
@@ -21,6 +21,7 @@ class AgentEngine:
         self.compactor = Compactor(max_chars=3000, retain_last_msgs=6)
         self.enable_thinking = enable_thinking
         self.recovery_manager = RecoveryManager()
+        self.reminder_injector = ReminderInjector()
         
     def run(self, user_prompt: str, session: Session = None, reporter: Reporter = None) -> Optional[Exception]:
         """Run 启动 Agent 的生命周期"""
@@ -96,6 +97,7 @@ class AgentEngine:
             logging.info("[Engine] 模型请求并发调用 %d 个工具...", len(response_msg.tool_calls))
             
             observation_msgs: List[Optional[Message]] = [None] * len(response_msg.tool_calls)
+            executed_tool_results: List[Optional[tuple]] = [None] * len(response_msg.tool_calls)
 
             def execute_tool(idx: int, call) -> None:
                 logging.info("  -> [Worker-%d] 🛠️ 触发并行执行: %s", idx, call.name)
@@ -103,6 +105,7 @@ class AgentEngine:
                     reporter.on_tool_call(call.name, call.arguments)
 
                 result = self.registry.execute(call)
+                executed_tool_results[idx] = (call, result)
 
                 finalOutput = result.output
                 if result.is_error:
@@ -147,6 +150,16 @@ class AgentEngine:
             if completed_observations:
                 session.append(*completed_observations)
             
+            for executed in executed_tool_results:
+                if executed is None:
+                    continue
+
+                tool_call, tool_result = executed
+                reminder_msg = self.reminder_injector.check_and_inject(tool_call, tool_result)
+                if reminder_msg is not None:
+                    session.append(reminder_msg)
+                    break
+
             # 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
 
         return None
