@@ -11,7 +11,8 @@ if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
 from internal.engine.reportor import Reporter
-from internal.engine.session import GlobalSessionMgr
+from internal.engine.session import GlobalSessionMgr, Session
+from internal.feishu.approval import GlobalApprovalMgr
 
 try:
     import lark_oapi as lark
@@ -33,23 +34,34 @@ def _read_field(value: Any, *names: str) -> Any:
 
 
 class _WebSocketEventHandler:
-    """适配飞书 WS SDK 所需的 do_without_validation 接口。"""
+    """适配飞书 WS SDK 所需的事件处理接口。"""
 
     def __init__(self, bot: "FeishuBot"):
         self.bot = bot
 
-    def do_without_validation(self, payload: bytes) -> None:
+    def _dispatch_payload(self, payload: bytes) -> None:
         if isinstance(payload, bytes):
             payload = payload.decode("utf-8")
         event = json.loads(payload)
         self.bot.dispatch_event(event)
         return None
 
+    def _do_without_validation(self, payload: bytes) -> None:
+        self._dispatch_payload(payload)
+
+    def do_without_validation(self, payload: bytes) -> None:
+        self._dispatch_payload(payload)
+
 
 class FeishuBot:
     """FeishuBot 封装了飞书机器人的配置与核心业务流。"""
 
-    def __init__(self, engine: Any, client: Optional[Any] = None):
+    def __init__(
+        self,
+        engine: Any,
+        session: Optional[Session] = None,
+        client: Optional[Any] = None,
+    ):
         app_id = os.getenv("FEISHU_APP_ID", "")
         app_secret = os.getenv("FEISHU_APP_SECRET", "")
         if not app_id or not app_secret:
@@ -58,6 +70,8 @@ class FeishuBot:
         self.app_id = app_id
         self.app_secret = app_secret
         self.engine = engine
+        self.sess = session
+        self.r: Optional[FeishuReporter] = None
         self.client = client or self._build_client()
 
     def _build_client(self) -> Any:
@@ -142,16 +156,49 @@ class FeishuBot:
             return
 
         logging.info("[Feishu] 收到会话 %s 消息: %s", chat_id, content)
+
+        stripped_content = content.strip()
+        if stripped_content.startswith("approve "):
+            task_id = stripped_content.removeprefix("approve ").strip()
+            if task_id:
+                GlobalApprovalMgr.resolve_approval(
+                    task_id,
+                    True,
+                    "人类管理员已批准操作",
+                )
+                logging.info("[Feishu] 会话 %s: 已批准任务 %s", chat_id, task_id)
+            return
+
+        if stripped_content.startswith("reject "):
+            task_id = stripped_content.removeprefix("reject ").strip()
+            if task_id:
+                GlobalApprovalMgr.resolve_approval(
+                    task_id,
+                    False,
+                    "人类管理员认为该操作存在极高风险，已无情拒绝",
+                )
+                logging.info("[Feishu] 会话 %s: 已拒绝任务 %s", chat_id, task_id)
+            return
+
         threading.Thread(
             target=self.handle_agent_run,
             args=(chat_id, content),
             daemon=True,
         ).start()
 
+    def reporter(self) -> Optional["FeishuReporter"]:
+        return self.r
+
     def handle_agent_run(self, chat_id: str, prompt: str) -> None:
         reporter = FeishuReporter(client=self.client, chat_id=chat_id)
-        work_dir = os.path.join(os.getcwd(), "workspace")
-        session = GlobalSessionMgr.get_or_create(chat_id, work_dir)
+        self.r = reporter
+
+        if self.sess is not None:
+            session = self.sess
+        else:
+            work_dir = os.path.join(os.getcwd(), "workspace")
+            session = GlobalSessionMgr.get_or_create(chat_id, work_dir)
+
         err = self.engine.run(prompt, session=session, reporter=reporter)
         if err is not None:
             reporter.send_msg(f"❌ Agent 运行崩溃: {err}")
@@ -161,6 +208,7 @@ class FeishuBot:
     dispatchEvent = dispatch_event
     createEventDispatcher = create_event_dispatcher
     handleMessageEvent = handle_message_event
+    Reporter = reporter
     handleAgentRun = handle_agent_run
 
 
@@ -225,8 +273,12 @@ class FeishuReporter(Reporter):
     OnMessage = on_message
 
 
-def new_feishu_bot(engine: Any, client: Optional[Any] = None) -> FeishuBot:
-    return FeishuBot(engine=engine, client=client)
+def new_feishu_bot(
+    engine: Any,
+    session: Optional[Session] = None,
+    client: Optional[Any] = None,
+) -> FeishuBot:
+    return FeishuBot(engine=engine, session=session, client=client)
 
 
 NewFeishuBot = new_feishu_bot

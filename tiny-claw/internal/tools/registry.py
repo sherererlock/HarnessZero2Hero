@@ -1,7 +1,12 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Tuple
 from ..schema.message import ToolDefinition, ToolCall, ToolResult
+
+
+# MiddlewareFunc 定义全局中间件签名：
+# 接收当前 ToolCall，返回是否放行以及拦截原因。
+MiddlewareFunc = Callable[[ToolCall], Tuple[bool, str]]
 
 
 class BaseTool(ABC):
@@ -31,6 +36,11 @@ class Registry(ABC):
         pass
 
     @abstractmethod
+    def use(self, middleware: MiddlewareFunc) -> None:
+        """挂载一个全局中间件，在工具执行前依次运行。"""
+        pass
+
+    @abstractmethod
     def get_available_tools(self) -> List[ToolDefinition]:
         """返回当前系统挂载的所有工具 Schema。"""
         pass
@@ -46,6 +56,7 @@ class ToolRegistry(Registry):
 
     def __init__(self):
         self.tools: Dict[str, BaseTool] = {}
+        self.middlewares: List[MiddlewareFunc] = []
 
     def register(self, tool: BaseTool) -> None:
         name = tool.name()
@@ -53,6 +64,9 @@ class ToolRegistry(Registry):
             logging.warning("工具 '%s' 已经被注册，将被覆盖。", name)
         self.tools[name] = tool
         logging.info("[Registry] 成功挂载工具: %s", name)
+
+    def use(self, middleware: MiddlewareFunc) -> None:
+        self.middlewares.append(middleware)
 
     def get_available_tools(self) -> List[ToolDefinition]:
         return [tool.definition() for tool in self.tools.values()]
@@ -65,6 +79,20 @@ class ToolRegistry(Registry):
                 output=f"Error: 系统中不存在名为 '{call.name}' 的工具。",
                 is_error=True,
             )
+
+        for middleware in self.middlewares:
+            allowed, reason = middleware(call)
+            if not allowed:
+                logging.warning(
+                    "[Registry] 工具 %s 被 Middleware 拦截: %s",
+                    call.name,
+                    reason,
+                )
+                return ToolResult(
+                    tool_call_id=call.id,
+                    output=f"执行被系统拦截。原因: {reason}",
+                    is_error=True,
+                )
 
         try:
             output = tool.execute(call.arguments)
