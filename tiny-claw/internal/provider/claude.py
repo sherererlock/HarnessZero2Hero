@@ -2,7 +2,7 @@ import json
 import os
 from typing import Any, List, Optional
 
-from ..schema.message import Message, Role, ToolCall, ToolDefinition
+from ..schema.message import Message, Role, ToolCall, ToolDefinition, Usage
 from .env_loader import resolve_api_key
 from .interface import LLMProvider
 
@@ -183,6 +183,14 @@ class ClaudeProvider(LLMProvider):
                 )
 
         result.tool_calls = tool_calls or None
+        usage = _get_attr(response, "usage")
+        prompt_tokens = int(_get_attr(usage, "input_tokens", 0) or 0)
+        completion_tokens = int(_get_attr(usage, "output_tokens", 0) or 0)
+        if prompt_tokens > 0 or completion_tokens > 0:
+            result.usage = Usage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
         return result
 
     def _decode_tool_arguments(self, arguments: Any) -> Any:

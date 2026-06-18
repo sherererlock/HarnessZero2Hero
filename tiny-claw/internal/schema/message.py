@@ -17,6 +17,12 @@ class ToolCall:
     arguments: Any 
 
 @dataclass
+class Usage:
+    """记录了单次大模型 API 调用的 Token 消耗"""
+    prompt_tokens: int
+    completion_tokens: int
+
+@dataclass
 class Message:
     """Message 代表上下文中传递的单条消息"""
     role: Role
@@ -25,6 +31,8 @@ class Message:
     tool_calls: Optional[List[ToolCall]] = None
     # 如果这是对某个工具调用的响应，此字段必须填写，以告知模型上下文的关联性
     tool_call_id: Optional[str] = None
+    # 如果这是大模型 (Assistant) 的回复，此字段存放本次调用的 Token 消耗
+    usage: Optional[Usage] = None
 
 @dataclass
 class ToolResult:

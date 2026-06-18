@@ -2,7 +2,7 @@ import json
 import os
 from typing import Any, List, Optional
 
-from ..schema.message import Message, Role, ToolCall, ToolDefinition
+from ..schema.message import Message, Role, ToolCall, ToolDefinition, Usage
 from .env_loader import resolve_api_key
 from .interface import LLMProvider
 
@@ -70,7 +70,17 @@ class OpenAIProvider(LLMProvider):
         if not choices:
             raise RuntimeError("API 返回了空的 Choices")
 
-        return self._message_from_openai(_get_attr(choices[0], "message"))
+        result_message = self._message_from_openai(_get_attr(choices[0], "message"))
+        usage = _get_attr(response, "usage")
+        prompt_tokens = int(_get_attr(usage, "prompt_tokens", 0) or 0)
+        completion_tokens = int(_get_attr(usage, "completion_tokens", 0) or 0)
+        if prompt_tokens > 0 or completion_tokens > 0:
+            result_message.usage = Usage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+            )
+
+        return result_message
 
     def _message_to_openai(self, message: Message) -> dict[str, Any]:
         if message.role == Role.SYSTEM:

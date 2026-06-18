@@ -19,6 +19,11 @@ class Session:
     history: List[Message] = field(default_factory=list)
     _lock: RLock = field(default_factory=RLock, init=False, repr=False)
 
+    # 【新增】用于统计该 Session 累计消耗的资源
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_cost_cny: float = 0.0
+
     def append(self, *msgs: Message) -> None:
         """线程安全地向 Session 中追加消息。"""
         with self._lock:
@@ -49,6 +54,13 @@ class Session:
                 break
 
             return result
+
+    def record_usage(self, prompt: int, completion: int, cost: float) -> None:
+        """给外部 tracker 调用的辅助方法，用于累加账单。"""
+        with self._lock:
+            self.total_prompt_tokens += prompt
+            self.total_completion_tokens += completion
+            self.total_cost_cny += cost
 
 
 def new_session(session_id: str, work_dir: str) -> Session:

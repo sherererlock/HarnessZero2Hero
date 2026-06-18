@@ -14,6 +14,7 @@ if PROJECT_ROOT not in sys.path:
 from internal.engine.loop import AgentEngine
 from internal.engine.reportor import Reporter
 from internal.engine.session import new_session
+from internal.provider.interface import LLMProvider
 from internal.provider.env_loader import _candidate_env_paths, _read_env_value
 from internal.provider.openai import new_zhipu_openai_provider
 from internal.tools.Bash import new_bash_tool
@@ -79,6 +80,37 @@ def new_cli_session():
     return new_session(session_id=f"cli-{uuid.uuid4().hex}", work_dir=work_dir)
 
 
+def build_registry_for_work_dir(
+    work_dir: str,
+    tool_factories: Iterable[ToolFactory],
+):
+    registry = new_registry()
+
+    for tool_factory in tool_factories:
+        registry.register(tool_factory(work_dir))
+
+    return registry
+
+
+def build_engine_with_provider_for_work_dir(
+    provider: LLMProvider,
+    work_dir: str,
+    tool_factories: Iterable[ToolFactory],
+    enable_thinking: bool = False,
+    plan_mode: bool = False,
+) -> AgentEngine:
+    registry = build_registry_for_work_dir(
+        work_dir=work_dir,
+        tool_factories=tool_factories,
+    )
+    return AgentEngine(
+        provider=provider,
+        registry=registry,
+        enable_thinking=enable_thinking,
+        PlanMode=plan_mode,
+    )
+
+
 def build_engine_for_work_dir(
     work_dir: str,
     tool_factories: Iterable[ToolFactory],
@@ -87,16 +119,12 @@ def build_engine_for_work_dir(
     plan_mode: bool = False,
 ) -> AgentEngine:
     llm_provider = new_zhipu_openai_provider(model)
-    registry = new_registry()
-
-    for tool_factory in tool_factories:
-        registry.register(tool_factory(work_dir))
-
-    return AgentEngine(
+    return build_engine_with_provider_for_work_dir(
         provider=llm_provider,
-        registry=registry,
+        work_dir=work_dir,
+        tool_factories=tool_factories,
         enable_thinking=enable_thinking,
-        PlanMode=plan_mode,
+        plan_mode=plan_mode,
     )
 
 
