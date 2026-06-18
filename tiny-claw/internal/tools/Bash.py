@@ -61,6 +61,11 @@ class BashTool(BaseTool):
 
 
         output = self._combine_output(completed.stdout, completed.stderr)
+        if self._looks_like_confirmation_prompt(output):
+            raise Exception(
+                "[BashTool] [❌] 检测到交互式确认提示，已拒绝继续执行。"
+                "请改为先走审批，再执行显式且非交互的命令。"
+            )
 
         if completed.returncode != 0:
             raise Exception(f"[BashTool] [❌]  执行报错: exit code {completed.returncode}\n输出:\n{output}")
@@ -84,8 +89,20 @@ class BashTool(BaseTool):
 
     def _shell_command(self, command: str) -> list[str]:
         if os.name == "nt":
-            return ["powershell", "-Command", command]
+            return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
         return ["bash", "-lc", command]
+
+    def _looks_like_confirmation_prompt(self, output: str) -> bool:
+        lowered = output.lower()
+        confirmation_markers = (
+            "are you sure you want to continue",
+            "[y] yes",
+            "yes to all",
+            "no to all",
+            "confirm",
+            "the recurse parameter was not specified",
+        )
+        return any(marker in lowered for marker in confirmation_markers)
 
     def _combine_output(self, stdout: Any, stderr: Any) -> str:
         parts = []

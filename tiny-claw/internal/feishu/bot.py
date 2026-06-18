@@ -16,10 +16,12 @@ from internal.feishu.approval import GlobalApprovalMgr
 
 try:
     import lark_oapi as lark
+    from lark_oapi.event.callback.model.p2_card_action_trigger import P2CardActionTriggerResponse
     import lark_oapi.api.im.v1 as larkim
     import lark_oapi.ws as larkws
 except ImportError:
     lark = None
+    P2CardActionTriggerResponse = None
     larkim = None
     larkws = None
 
@@ -39,18 +41,17 @@ class _WebSocketEventHandler:
     def __init__(self, bot: "FeishuBot"):
         self.bot = bot
 
-    def _dispatch_payload(self, payload: bytes) -> None:
+    def _dispatch_payload(self, payload: bytes) -> Any:
         if isinstance(payload, bytes):
             payload = payload.decode("utf-8")
         event = json.loads(payload)
-        self.bot.dispatch_event(event)
-        return None
+        return self.bot.dispatch_event(event)
 
-    def _do_without_validation(self, payload: bytes) -> None:
-        self._dispatch_payload(payload)
+    def _do_without_validation(self, payload: bytes) -> Any:
+        return self._dispatch_payload(payload)
 
-    def do_without_validation(self, payload: bytes) -> None:
-        self._dispatch_payload(payload)
+    def do_without_validation(self, payload: bytes) -> Any:
+        return self._dispatch_payload(payload)
 
 
 class FeishuBot:
@@ -72,6 +73,7 @@ class FeishuBot:
         self.engine = engine
         self.sess = session
         self.r: Optional[FeishuReporter] = None
+        self._last_chat_id: Optional[str] = None
         self.client = client or self._build_client()
 
     def _build_client(self) -> Any:
@@ -124,7 +126,12 @@ class FeishuBot:
         verify_token = os.getenv("FEISHU_VERIFY_TOKEN", "")
         return self.create_event_dispatcher(verify_token, encrypt_key)
 
-    def dispatch_event(self, event: Any) -> None:
+    def dispatch_event(self, event: Any) -> Any:
+        header = _read_field(event, "header")
+        event_type = _read_field(header, "event_type") or _read_field(event, "event_type")
+        if event_type == "card.action.trigger":
+            return self.handle_card_action_event(event)
+
         event_body = _read_field(event, "event") or event
         message = _read_field(event_body, "message")
         if message is None:
@@ -155,6 +162,7 @@ class FeishuBot:
             logging.warning("[Feishu] 消息事件缺少 chat_id: %r", event)
             return
 
+        self._last_chat_id = chat_id
         logging.info("[Feishu] 收到会话 %s 消息: %s", chat_id, content)
 
         stripped_content = content.strip()
@@ -186,7 +194,84 @@ class FeishuBot:
             daemon=True,
         ).start()
 
+    def handle_card_action_event(self, event: Any) -> Any:
+        event_body = _read_field(event, "event") or event
+        action = _read_field(event_body, "action")
+        value = _read_field(action, "value") or {}
+        action_name = _read_field(value, "action")
+        task_id = _read_field(value, "task_id")
+        operator = _read_field(event_body, "operator") or {}
+        operator_id = (
+            _read_field(operator, "user_id")
+            or _read_field(operator, "open_id")
+            or _read_field(operator, "union_id")
+            or "unknown-user"
+        )
+
+        if not task_id or action_name not in {"approve", "reject"}:
+            logging.warning("[Feishu] 收到无法识别的卡片回调: %r", event)
+            return self._build_card_callback_response(
+                toast_type="warning",
+                toast_content="未识别到有效的审批任务，卡片保持不变。",
+            )
+
+        allowed = action_name == "approve"
+        pending = GlobalApprovalMgr.get_pending_task(task_id)
+        reason = (
+            f"飞书审批按钮已批准，操作人: {operator_id}"
+            if allowed
+            else f"飞书审批按钮已拒绝，操作人: {operator_id}"
+        )
+        GlobalApprovalMgr.resolve_approval(task_id, allowed, reason)
+        logging.info(
+            "[Feishu] 收到卡片审批结果 (TaskID: %s, Allowed: %s, Operator: %s)",
+            task_id,
+            allowed,
+            operator_id,
+        )
+        if pending is None:
+            return self._build_card_callback_response(
+                toast_type="warning",
+                toast_content="审批结果已收到，但任务可能已处理完成，卡片保持不变。",
+            )
+
+        resolved_card = GlobalApprovalMgr.build_resolved_card(
+            task_id=task_id,
+            tool_name=pending.tool_name,
+            args=pending.args,
+            allowed=allowed,
+            operator_id=operator_id,
+        )
+        return self._build_card_callback_response(
+            toast_type="success" if allowed else "warning",
+            toast_content="已批准该操作" if allowed else "已拒绝该操作",
+            card=resolved_card,
+        )
+
+    def _build_card_callback_response(
+        self,
+        toast_type: str,
+        toast_content: str,
+        card: Optional[Mapping[str, Any]] = None,
+    ) -> Any:
+        payload: dict[str, Any] = {
+            "toast": {
+                "type": toast_type,
+                "content": toast_content,
+            }
+        }
+        if card is not None:
+            payload["card"] = {
+                "type": "raw",
+                "data": card,
+            }
+        if P2CardActionTriggerResponse is not None:
+            return P2CardActionTriggerResponse(payload)
+        return payload
+
     def reporter(self) -> Optional["FeishuReporter"]:
+        if self.r is None and self._last_chat_id:
+            self.r = FeishuReporter(client=self.client, chat_id=self._last_chat_id)
         return self.r
 
     def handle_agent_run(self, chat_id: str, prompt: str) -> None:
@@ -219,13 +304,12 @@ class FeishuReporter(Reporter):
         self.client = client
         self.chat_id = chat_id
 
-    def _build_request(self, text: str) -> Any:
-        content = json.dumps({"text": text}, ensure_ascii=False)
+    def _build_request(self, msg_type: str, content: str) -> Any:
         if larkim is None:
             return {
                 "receive_id_type": "chat_id",
                 "receive_id": self.chat_id,
-                "msg_type": "text",
+                "msg_type": msg_type,
                 "content": content,
             }
         return (
@@ -234,7 +318,7 @@ class FeishuReporter(Reporter):
             .request_body(
                 larkim.CreateMessageRequestBody.builder()
                 .receive_id(self.chat_id)
-                .msg_type("text")
+                .msg_type(msg_type)
                 .content(content)
                 .build()
             )
@@ -242,7 +326,13 @@ class FeishuReporter(Reporter):
         )
 
     def send_msg(self, text: str) -> None:
-        request = self._build_request(text)
+        content = json.dumps({"text": text}, ensure_ascii=False)
+        request = self._build_request("text", content)
+        self.client.im.v1.message.create(request)
+
+    def send_interactive_card(self, card: Mapping[str, Any]) -> None:
+        content = json.dumps(card, ensure_ascii=False)
+        request = self._build_request("interactive", content)
         self.client.im.v1.message.create(request)
 
     def on_thinking(self) -> None:
