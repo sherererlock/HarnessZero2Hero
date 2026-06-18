@@ -1,6 +1,6 @@
 import logging
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional
+from typing import Any, List, Optional
 from ..context.composer import PromptComposer
 from ..context.compactor import Compactor
 from ..context.recovery import RecoveryManager
@@ -163,3 +163,94 @@ class AgentEngine:
             # 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
 
         return None
+
+    def run_sub(
+        self,
+        task_prompt: str,
+        read_only_registry: Registry,
+        reporter: Any = None,
+    ) -> str:
+        """启动一次性、只读受限的子智能体探索循环。"""
+        context_history = [
+            Message(
+                role=Role.SYSTEM,
+                content=(
+                    "你是一个专门负责深度探索的探路者 (Explorer Subagent)。\n"
+                    "你的任务是根据主架构师的指令，在当前工作区内仔细阅读代码、查阅日志，搜集足够的信息。\n"
+                    "【核心纪律】\n"
+                    "1. 你必须、且只能依靠内置工具（如 bash 的 find/grep，或 read_file）去寻找答案。绝对不允许凭空捏造或猜测！\n"
+                    "2. 如果你没有找到确切的答案，你必须继续使用工具深入搜索。\n"
+                    "3. 当且仅当你找到了确切的线索后，停止调用工具，直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报来做下一步决策。"
+                ),
+            ),
+            Message(role=Role.USER, content=task_prompt),
+        ]
+
+        max_sub_turns = 10
+        turn_count = 0
+
+        while True:
+            turn_count += 1
+            if turn_count > max_sub_turns:
+                raise RuntimeError(
+                    f"子智能体探索过于深入，超过 {max_sub_turns} 轮被强制召回，请主 Agent 给它更明确的指令"
+                )
+
+            available_tools = read_only_registry.get_available_tools()
+            compacted_context = self.compactor.compact(context_history)
+
+            try:
+                action_resp = self.provider.generate(compacted_context, available_tools)
+            except Exception as exc:
+                raise RuntimeError(f"子智能体推理失败: {exc}") from exc
+
+            context_history.append(action_resp)
+
+            if not action_resp.tool_calls:
+                return action_resp.content
+
+            logging.info(
+                "[Engine][Subagent] 模型请求并发调用 %d 个只读工具...",
+                len(action_resp.tool_calls),
+            )
+            observation_msgs: List[Optional[Message]] = [None] * len(action_resp.tool_calls)
+
+            def execute_tool(idx: int, call) -> None:
+                if reporter is not None:
+                    reporter.on_tool_call(f"[Subagent] {call.name}", call.arguments)
+
+                result = read_only_registry.execute(call)
+                final_output = result.output
+                if result.is_error:
+                    final_output = self.recovery_manager.analyze_and_inject(
+                        call.name, result.output
+                    )
+
+                if reporter is not None:
+                    display_output = final_output
+                    if len(display_output) > 200:
+                        display_output = display_output[:200] + "... (已截断)"
+
+                    reporter.on_tool_result(
+                        f"[Subagent] {call.name}",
+                        display_output,
+                        result.is_error,
+                    )
+
+                observation_msgs[idx] = Message(
+                    role=Role.USER,
+                    content=final_output,
+                    tool_call_id=call.id,
+                )
+
+            with ThreadPoolExecutor(max_workers=len(action_resp.tool_calls)) as executor:
+                futures = [
+                    executor.submit(execute_tool, idx, tool_call)
+                    for idx, tool_call in enumerate(action_resp.tool_calls)
+                ]
+                for future in futures:
+                    future.result()
+
+            for obs in observation_msgs:
+                if obs is not None:
+                    context_history.append(obs)
