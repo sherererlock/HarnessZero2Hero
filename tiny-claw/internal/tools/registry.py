@@ -1,6 +1,7 @@
 import logging
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
+from ..observability.trace import get_current_tracer, preview_text
 from ..schema.message import ToolDefinition, ToolCall, ToolResult
 
 
@@ -46,7 +47,7 @@ class Registry(ABC):
         pass
 
     @abstractmethod
-    def execute(self, call: ToolCall) -> ToolResult:
+    def execute(self, call: ToolCall, parent_span: Any = None) -> ToolResult:
         """实际路由并执行模型请求的工具调用。"""
         pass
 
@@ -71,7 +72,30 @@ class ToolRegistry(Registry):
     def get_available_tools(self) -> List[ToolDefinition]:
         return [tool.definition() for tool in self.tools.values()]
 
-    def execute(self, call: ToolCall) -> ToolResult:
+    def execute(self, call: ToolCall, parent_span: Optional[Any] = None) -> ToolResult:
+        tracer = get_current_tracer()
+        if tracer is None and parent_span is not None:
+            tracer = getattr(parent_span, "tracer", None)
+
+        if tracer is None:
+            return self._execute_without_trace(call)
+
+        with tracer.span(
+            "Tool.Execute",
+            parent=parent_span,
+            attributes={
+                "tool_name": call.name,
+                "arguments_preview": preview_text(call.arguments, limit=300),
+            },
+        ) as span:
+            result = self._execute_without_trace(call)
+            span.add_attribute("is_error", result.is_error)
+            span.add_attribute("output_preview", preview_text(result.output, limit=300))
+            if result.is_error:
+                span.record_error(result.output)
+            return result
+
+    def _execute_without_trace(self, call: ToolCall) -> ToolResult:
         tool = self.tools.get(call.name)
         if tool is None:
             return ToolResult(

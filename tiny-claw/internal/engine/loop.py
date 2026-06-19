@@ -4,6 +4,7 @@ from typing import Any, List, Optional
 from ..context.composer import PromptComposer
 from ..context.compactor import Compactor
 from ..context.recovery import RecoveryManager
+from ..observability.trace import new_tracer
 from ..provider.interface import LLMProvider
 from ..tools.registry import Registry
 from .reportor import Reporter
@@ -31,138 +32,195 @@ class AgentEngine:
         logging.info(f"[Engine] 引擎启动， 会话：{session.id} 锁定工作区: {session.work_dir}")
         if self.enable_thinking:
             logging.info("[Engine] 慢思考模式已开启")
-        
+
         prompt_composer = PromptComposer(session.work_dir, self.PlanMode)
         system_prompt = prompt_composer.build()
         session.append(Message(role=Role.USER, content=user_prompt))
-        
-        turn_count = 0
-        # 2. The Main Loop: 心跳开始 (标准的 ReAct 循环)
-        while True:
-            turn_count += 1
-            logging.info(f"========== [Turn {turn_count}] 开始 ==========")
-            
-            # 获取当前挂载的所有工具定义
-            available_tools = self.registry.get_available_tools()
 
-            working_memory = session.get_working_memory(6)
-            context_history = [
-                system_prompt
-            ]
-            context_history.extend(working_memory)
-            
-            compactedContext = self.compactor.compact(context_history)
+        tracer = new_tracer(session.work_dir, session.id)
+        root_span = None
+        trace_path = None
 
-            if self.enable_thinking:
-                if reporter:
-                    reporter.on_thinking()
+        try:
+            with tracer.span(
+                "Agent.Run",
+                attributes={
+                    "session_id": session.id,
+                    "work_dir": session.work_dir,
+                },
+            ) as root_span:
+                turn_count = 0
+                # 2. The Main Loop: 心跳开始 (标准的 ReAct 循环)
+                while True:
+                    turn_count += 1
+                    logging.info(f"========== [Turn {turn_count}] 开始 ==========")
 
-                logging.info("[Engine][Phase: 1] 剥夺工具访问权限，强制进入慢思考")
-                try:
-                    think_resp = self.provider.generate(compactedContext, None)
-                    if think_resp.content:
-                        logging.info(f"🤖 模型: {think_resp.content}")
-                        compactedContext.append(think_resp)
-                        session.append(think_resp)
-                except Exception as e:
-                    return RuntimeError(f"Thinking 阶段生成失败: {e}")
+                    with tracer.span(
+                        f"Turn-{turn_count}",
+                        parent=root_span,
+                        attributes={"turn_index": turn_count},
+                    ) as turn_span:
+                        # 获取当前挂载的所有工具定义
+                        available_tools = self.registry.get_available_tools()
 
-            # 向大模型发起推理请求 (包含 Reasoning)
-            logging.info("[Engine][Phase: 2] 恢复工具挂载，等待模型采取行动......")
+                        working_memory = session.get_working_memory(6)
+                        context_history = [
+                            system_prompt
+                        ]
+                        context_history.extend(working_memory)
 
-            try:
-                # 注意：Python 中不需要显式传递 context，除非有特殊需求
-                response_msg = self.provider.generate(compactedContext, available_tools)
-            except Exception as e:
-                return RuntimeError(f"Action 阶段生成失败: {e}")
+                        compactedContext = self.compactor.compact(context_history)
+                        turn_span.add_attribute(
+                            "context_message_count", len(compactedContext)
+                        )
 
-            # 将模型的响应完整追加到上下文历史中
-            compactedContext.append(response_msg)
-            session.append(response_msg)
+                        if self.enable_thinking:
+                            if reporter:
+                                reporter.on_thinking()
 
-            if response_msg.content != "" and reporter is not None:
-                reporter.on_message(response_msg.content)
-            
-            # 如果模型回复了纯文本，打印出来 (这通常是它的思考过程，或是最终结果)
-            if response_msg.content:
-                logging.info(f"🤖 模型: {response_msg.content}")
-                
-            # 3. 退出条件判断
-            # 如果模型没有请求任何工具调用，说明它认为任务已经完成，跳出循环。
-            if not response_msg.tool_calls:
-                logging.info("[Engine] 任务完成，退出循环。")
-                break
-                
-            # 4. 执行行动 (Action) 与 获取观察结果 (Observation)
-            logging.info("[Engine] 模型请求并发调用 %d 个工具...", len(response_msg.tool_calls))
-            
-            observation_msgs: List[Optional[Message]] = [None] * len(response_msg.tool_calls)
-            executed_tool_results: List[Optional[tuple]] = [None] * len(response_msg.tool_calls)
+                            logging.info("[Engine][Phase: 1] 剥夺工具访问权限，强制进入慢思考")
+                            try:
+                                with tracer.span(
+                                    "LLM.Thinking",
+                                    parent=turn_span,
+                                ) as think_span:
+                                    think_resp = self.provider.generate(compactedContext, None)
+                                    if think_resp.usage is not None:
+                                        think_span.add_attribute(
+                                            "prompt_tokens",
+                                            think_resp.usage.prompt_tokens,
+                                        )
+                                        think_span.add_attribute(
+                                            "completion_tokens",
+                                            think_resp.usage.completion_tokens,
+                                        )
+                                    if think_resp.content:
+                                        logging.info(f"🤖 模型: {think_resp.content}")
+                                        compactedContext.append(think_resp)
+                                        session.append(think_resp)
+                            except Exception as e:
+                                return RuntimeError(f"Thinking 阶段生成失败: {e}")
 
-            def execute_tool(idx: int, call) -> None:
-                logging.info("  -> [Worker-%d] 🛠️ 触发并行执行: %s", idx, call.name)
-                if reporter:
-                    reporter.on_tool_call(call.name, call.arguments)
+                        # 向大模型发起推理请求 (包含 Reasoning)
+                        logging.info("[Engine][Phase: 2] 恢复工具挂载，等待模型采取行动......")
 
-                result = self.registry.execute(call)
-                executed_tool_results[idx] = (call, result)
+                        try:
+                            with tracer.span(
+                                "LLM.Action",
+                                parent=turn_span,
+                                attributes={
+                                    "available_tool_count": len(available_tools),
+                                },
+                            ) as action_span:
+                                response_msg = self.provider.generate(
+                                    compactedContext, available_tools
+                                )
+                                if response_msg.usage is not None:
+                                    action_span.add_attribute(
+                                        "prompt_tokens",
+                                        response_msg.usage.prompt_tokens,
+                                    )
+                                    action_span.add_attribute(
+                                        "completion_tokens",
+                                        response_msg.usage.completion_tokens,
+                                    )
+                                action_span.add_attribute(
+                                    "tool_call_count", len(response_msg.tool_calls or [])
+                                )
+                        except Exception as e:
+                            return RuntimeError(f"Action 阶段生成失败: {e}")
 
-                finalOutput = result.output
-                if result.is_error:
-                    finalOutput = self.recovery_manager.analyze_and_inject(call.name, result.output)
-                    logging.info(f"  -> [Worker-%idx] 修复后的输出: {finalOutput}")
-                else:
-                    logging.error(f"  -> [Worker-%d] 工具输出: {finalOutput}")
-                    
-                if reporter:
-                    displayOutput = finalOutput
-                    if len(displayOutput) > 200:
-                        displayOutput = displayOutput[:200] + "...(已截断，实际长度: %d)" % len(displayOutput)
+                        # 将模型的响应完整追加到上下文历史中
+                        compactedContext.append(response_msg)
+                        session.append(response_msg)
 
-                    reporter.on_tool_result(call.name, displayOutput, result.is_error)
+                        if response_msg.content != "" and reporter is not None:
+                            reporter.on_message(response_msg.content)
 
-                if result.is_error:
-                    logging.error("  -> [Worker-%d] ❌ 工具执行报错: %s", idx, result.output)
-                else:
-                    logging.info("  -> [Worker-%d] ✅ 工具执行成功 (返回 %d 字节)", idx, len(result.output))
+                        # 如果模型回复了纯文本，打印出来 (这通常是它的思考过程，或是最终结果)
+                        if response_msg.content:
+                            logging.info(f"🤖 模型: {response_msg.content}")
 
-                observation_msgs[idx] = Message(
-                    role=Role.USER,
-                    content=result.output,
-                    tool_call_id=call.id,
-                )
+                        # 3. 退出条件判断
+                        # 如果模型没有请求任何工具调用，说明它认为任务已经完成，跳出循环。
+                        if not response_msg.tool_calls:
+                            logging.info("[Engine] 任务完成，退出循环。")
+                            break
 
-            with ThreadPoolExecutor(max_workers=len(response_msg.tool_calls)) as executor:
-                futures = [
-                    executor.submit(execute_tool, idx, tool_call)
-                    for idx, tool_call in enumerate(response_msg.tool_calls)
-                ]
-                for future in futures:
-                    future.result()
+                        # 4. 执行行动 (Action) 与 获取观察结果 (Observation)
+                        logging.info("[Engine] 模型请求并发调用 %d 个工具...", len(response_msg.tool_calls))
 
-            logging.info("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
-            completed_observations: List[Message] = []
-            for obs in observation_msgs:
-                if obs is not None:
-                    compactedContext.append(obs)
-                    completed_observations.append(obs)
+                        observation_msgs: List[Optional[Message]] = [None] * len(response_msg.tool_calls)
+                        executed_tool_results: List[Optional[tuple]] = [None] * len(response_msg.tool_calls)
 
-            if completed_observations:
-                session.append(*completed_observations)
-            
-            for executed in executed_tool_results:
-                if executed is None:
-                    continue
+                        def execute_tool(idx: int, call, parent_span) -> None:
+                            logging.info("  -> [Worker-%d] 🛠️ 触发并行执行: %s", idx, call.name)
+                            if reporter:
+                                reporter.on_tool_call(call.name, call.arguments)
 
-                tool_call, tool_result = executed
-                reminder_msg = self.reminder_injector.check_and_inject(tool_call, tool_result)
-                if reminder_msg is not None:
-                    session.append(reminder_msg)
-                    break
+                            result = self.registry.execute(call, parent_span=parent_span)
+                            executed_tool_results[idx] = (call, result)
 
-            # 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
+                            finalOutput = result.output
+                            if result.is_error:
+                                finalOutput = self.recovery_manager.analyze_and_inject(call.name, result.output)
+                                logging.info("  -> [Worker-%d] 修复后的输出: %s", idx, finalOutput)
+                            else:
+                                logging.info("  -> [Worker-%d] 工具输出: %s", idx, finalOutput)
 
-        return None
+                            if reporter:
+                                displayOutput = finalOutput
+                                if len(displayOutput) > 200:
+                                    displayOutput = displayOutput[:200] + "...(已截断，实际长度: %d)" % len(displayOutput)
+
+                                reporter.on_tool_result(call.name, displayOutput, result.is_error)
+
+                            if result.is_error:
+                                logging.error("  -> [Worker-%d] ❌ 工具执行报错: %s", idx, result.output)
+                            else:
+                                logging.info("  -> [Worker-%d] ✅ 工具执行成功 (返回 %d 字节)", idx, len(result.output))
+
+                            observation_msgs[idx] = Message(
+                                role=Role.USER,
+                                content=result.output,
+                                tool_call_id=call.id,
+                            )
+
+                        with ThreadPoolExecutor(max_workers=len(response_msg.tool_calls)) as executor:
+                            futures = [
+                                executor.submit(execute_tool, idx, tool_call, turn_span)
+                                for idx, tool_call in enumerate(response_msg.tool_calls)
+                            ]
+                            for future in futures:
+                                future.result()
+
+                        logging.info("[Engine] 所有并发工具执行完毕，开始聚合观察结果 (Observation)...")
+                        completed_observations: List[Message] = []
+                        for obs in observation_msgs:
+                            if obs is not None:
+                                compactedContext.append(obs)
+                                completed_observations.append(obs)
+
+                        if completed_observations:
+                            session.append(*completed_observations)
+
+                        for executed in executed_tool_results:
+                            if executed is None:
+                                continue
+
+                            tool_call, tool_result = executed
+                            reminder_msg = self.reminder_injector.check_and_inject(tool_call, tool_result)
+                            if reminder_msg is not None:
+                                session.append(reminder_msg)
+                                break
+
+                        # 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
+
+            return None
+        finally:
+            if root_span is not None:
+                trace_path = tracer.export_trace(root_span)
+                logging.info("[Tracing] 本次任务执行回放已保存到: %s", trace_path)
 
     def run_sub(
         self,
