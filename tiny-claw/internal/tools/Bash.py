@@ -89,7 +89,7 @@ class BashTool(BaseTool):
 
     def _shell_command(self, command: str) -> list[str]:
         if os.name == "nt":
-            return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+            return ["bash", "-lc", command]
         return ["bash", "-lc", command]
 
     def _looks_like_confirmation_prompt(self, output: str) -> bool:
