@@ -44,7 +44,7 @@ class BashTool(BaseTool):
                 self._shell_command(command),
                 cwd=self.work_dir,
                 capture_output=True,
-                text=True,
+                text=False,
                 timeout=TIMEOUT_SECONDS,
                 check=False,
             )
