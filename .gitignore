@@ -220,3 +220,4 @@ tiny-claw/tests/
 .serena/.gitignore
 .serena/project.yml
 .claude/state/instructions-loaded.jsonl
+workspace/.claw/traces/
