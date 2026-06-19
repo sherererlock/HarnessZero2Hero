@@ -221,3 +221,4 @@ tiny-claw/tests/
 .serena/project.yml
 .claude/state/instructions-loaded.jsonl
 workspace/.claw/traces/
+workspace/
