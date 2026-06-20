@@ -32,19 +32,17 @@ def main() -> None:
             id="test_002_code_gen",
             name="测试代码阅读与创建新文件的综合能力",
             setup_script=(
-                "cat <<'EOF' > math.py\n"
-                "package math\n\n"
-                "func Multiply(a, b int) int {\n"
-                "\treturn a * b\n"
-                "}\n"
+                "cat <<'EOF' > calculator.py\n"
+                "def multiply(a, b):\n"
+                "    return a * b\n"
                 "EOF"
             ),
             task_prompt=(
-                "当前目录下有一个 math.go。请你仔细阅读它，然后在同级目录下，"
-                "帮我写一个规范的单元测试文件 math_test.go，用来测试 Multiply 函数。"
+                "当前目录下有一个 calculator.py。请你仔细阅读它，然后在同级目录下，"
+                "帮我写一个规范的单元测试文件 test_calculator.py，用来测试 multiply 函数。测试时用python3运行。"
                 "请务必包含正常的测试用例。"
             ),
-            validate_script="go mod init bench && go test -v ./...",
+            validate_script="python3 -m unittest -v",
         ),
     ]
 
