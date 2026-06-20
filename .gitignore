@@ -222,3 +222,5 @@ tiny-claw/tests/
 .claude/state/instructions-loaded.jsonl
 workspace/.claw/traces/
 workspace/
+.claude/sessions/.last_inbox_check
+.claude/state/changed-files.jsonl
