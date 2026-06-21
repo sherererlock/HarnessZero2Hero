@@ -72,9 +72,10 @@ class FeishuBot:
         self.app_secret = app_secret
         self.engine = engine
         self.sess = session
-        self.r: Optional[FeishuReporter] = None
-        self._last_chat_id: Optional[str] = None
         self.client = client or self._build_client()
+        # 按 chat_id 隔离 reporter，避免并发请求互相覆盖目标会话。
+        self._reporters: dict[str, FeishuReporter] = {}
+        self._reporters_lock = threading.RLock()
 
     def _build_client(self) -> Any:
         if lark is None:
@@ -147,6 +148,14 @@ class FeishuBot:
 
         return dispatcher
 
+    def _get_or_create_reporter(self, chat_id: str) -> "FeishuReporter":
+        with self._reporters_lock:
+            reporter = self._reporters.get(chat_id)
+            if reporter is None:
+                reporter = FeishuReporter(client=self.client, chat_id=chat_id)
+                self._reporters[chat_id] = reporter
+            return reporter
+
     def handle_message_event(self, event: Any) -> None:
         event_body = _read_field(event, "event") or event
         message = _read_field(event_body, "message")
@@ -162,7 +171,6 @@ class FeishuBot:
             logging.warning("[Feishu] 消息事件缺少 chat_id: %r", event)
             return
 
-        self._last_chat_id = chat_id
         logging.info("[Feishu] 收到会话 %s 消息: %s", chat_id, content)
 
         stripped_content = content.strip()
@@ -269,14 +277,20 @@ class FeishuBot:
             return P2CardActionTriggerResponse(payload)
         return payload
 
-    def reporter(self) -> Optional["FeishuReporter"]:
-        if self.r is None and self._last_chat_id:
-            self.r = FeishuReporter(client=self.client, chat_id=self._last_chat_id)
-        return self.r
+    def reporter(self, chat_id: Optional[str] = None) -> Optional["FeishuReporter"]:
+        with self._reporters_lock:
+            if chat_id is not None:
+                return self._reporters.get(chat_id)
+
+            if len(self._reporters) == 1:
+                return next(iter(self._reporters.values()))
+
+        if chat_id is None and self._reporters:
+            logging.warning("[Feishu] 当前存在多个活跃会话，请显式传入 chat_id 获取 reporter")
+        return None
 
     def handle_agent_run(self, chat_id: str, prompt: str) -> None:
-        reporter = FeishuReporter(client=self.client, chat_id=chat_id)
-        self.r = reporter
+        reporter = self._get_or_create_reporter(chat_id)
 
         if self.sess is not None:
             session = self.sess

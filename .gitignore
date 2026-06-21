@@ -224,3 +224,4 @@ workspace/.claw/traces/
 workspace/
 .claude/sessions/.last_inbox_check
 .claude/state/changed-files.jsonl
+workspace_ops/.claw/traces/

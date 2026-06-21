@@ -278,7 +278,13 @@ GlobalApprovalMgr = GLOBAL_APPROVAL_MGR
 
 def is_dangerous_command(tool_name: str, args: Any) -> bool:
     """简单的正则黑名单检查，判断该工具调用是否需要审批。"""
-    if tool_name not in {"bash", "write_file", "edit_file"}:
+    if tool_name == "read_file":
+        return False
+
+    if tool_name in {"write_file", "edit_file"}:
+        return True
+
+    if tool_name != "bash":
         return False
 
     if tool_name == "bash":
@@ -297,6 +303,9 @@ def is_dangerous_command(tool_name: str, args: Any) -> bool:
             r"sudo\s+",
             r"drop\s+",
             r">.*\.go",
+            r"nginx\s+-s",
+            r"systemctl\s+",
+            r"\bkill\s+",
             r"\.claw\b",
         ]
         for pattern in dangerous_patterns:
