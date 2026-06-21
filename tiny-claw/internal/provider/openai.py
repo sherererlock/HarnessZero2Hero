@@ -6,7 +6,7 @@ from ..schema.message import Message, Role, ToolCall, ToolDefinition, Usage
 from .env_loader import resolve_api_key
 from .interface import LLMProvider
 
-ZHIPU_BASE_URL = "https://token-plan-cn.xiaomimimo.com/v1"
+ZHIPU_BASE_URL = "https://token-plan-sgp.xiaomimimo.com/v1"
 
 
 def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
