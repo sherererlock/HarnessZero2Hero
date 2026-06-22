@@ -12,7 +12,7 @@
 
 如果你的 Harness 不能像一位资深导师那样，在 Agent 钻牛角尖时及时拍拍它的肩膀说：“停下，你这条路走不通，换个思路吧”，那么你的引擎就是不合格的。
 
-今天，我们将开启并深入第四大模块：稳定性控制与多智能体。我们将用 Go 语言实现一套 System Reminders（运行时动态提醒机制），作为在后台随时准备打断和引导 Agent 的那双“无形之手”。
+今天，我们将开启并深入第四大模块：稳定性控制与多智能体。我们将用 Python 实现一套 System Reminders（运行时动态提醒机制），作为在后台随时准备打断和引导 Agent 的那双“无形之手”。
 
 ## 为什么 System Prompt 拦不住死循环？
 
@@ -46,24 +46,24 @@
 
 我们将所有的提醒逻辑封装在 internal/engine 目录下，并修改 loop.go 将其挂载。
 ```
-go-tiny-claw/
+tiny-claw/
 ├── cmd/
 │   └── claw/
-│       └── main.go          # 【修改】在 main 中构造一个必将诱发死循环的测试
+│       └── main_reminder.py  # 【修改】在 main 中构造一个必将诱发死循环的测试
 ├── internal/
-│   ├── context/             # 保持不变 (Composer, Compactor, Recovery)
+│   ├── context/              # 保持不变 (Composer, Compactor, Recovery)
 │   ├── engine/
-│   │   ├── loop.go          # 【修改】在循环尾部接入 Reminder 注入逻辑
-│   │   ├── session.go 
-│   │   ├── reporter.go 
-│   │   ├── terminal_reporter.go
-│   │   └── reminder.go      # 【新增】死循环探测与动态提醒生成器
-│   ├── feishu/              
-│   ├── provider/            
-│   ├── schema/              
-│   └── tools/               
-├── go.mod
-└── go.sum
+│   │   ├── loop.py           # 【修改】在循环尾部接入 Reminder 注入逻辑
+│   │   ├── session.py
+│   │   ├── reportor.py
+│   │   ├── terminal_reporter.py
+│   │   └── reminder.py       # 【新增】死循环探测与动态提醒生成器
+│   ├── feishu/
+│   ├── provider/
+│   ├── schema/
+│   └── tools/
+├── requirements.txt
+└── setup.py
 ```
 
 ### 第 1 步：实现 Reminder 探测与注入器
@@ -71,78 +71,93 @@ go-tiny-claw/
 新建 internal/engine/reminder.go。我们需要在这里维护一个滑动窗口（Sliding Window）或哈希计数器，来监控最近几次的工具调用情况。
 
 为了保持极简，我们重点解决最致命的一个问题：Doom Loop Detection（死循环检测），即模型连续多次使用了完全相同的参数特征调用了同一个工具，并且都失败了。
-```
-// internal/engine/reminder.go
-package engine
+```python
+# internal/engine/reminder.py
+from __future__ import annotations
 
-import (
- "crypto/md5"
- "encoding/hex"
- "fmt"
- "log"
+import hashlib
+import json
+import logging
+from typing import Any, Optional
 
- "github.com/yourname/go-tiny-claw/internal/schema"
-)
+from ..schema.message import Message, Role, ToolCall, ToolResult
 
-// ReminderInjector 负责在运行时监控上下文，并在模型陷入执念时动态注入强力打断信息
-type ReminderInjector struct {
- // 用于记录连续失败的工具调用指纹 (ToolName + Arguments 的 Hash)
-    consecutiveFailures map[string]int
-}
+logger = logging.getLogger(__name__)
 
-func NewReminderInjector() *ReminderInjector {
- return &ReminderInjector{
-        consecutiveFailures: make(map[string]int),
-    }
-}
 
-// generateFingerprint 生成工具调用的唯一指纹，用于判断大模型是否在重复相同的动作
-func generateFingerprint(toolName string, args []byte) string {
-    hasher := md5.New()
-    hasher.Write([]byte(toolName))
-    hasher.Write(args)
- return hex.EncodeToString(hasher.Sum(nil))
-}
+class ReminderInjector:
+    """负责在运行时监控上下文，并在模型陷入执念时动态注入强力打断信息。"""
 
-// CheckAndInject 分析本轮的执行结果，决定是否要在 Context 尾部追加 Reminder
-// 返回的 schema.Message 将作为最新的用户输入，强制大模型优先阅读。
-func (r *ReminderInjector) CheckAndInject(lastToolCall schema.ToolCall, lastResult schema.ToolResult) *schema.Message {
-    fingerprint := generateFingerprint(lastToolCall.Name, lastToolCall.Arguments)
+    def __init__(self) -> None:
+        # 用于记录连续失败的工具调用指纹 (ToolName + Arguments 的 Hash)
+        self.consecutive_failures: dict[str, int] = {}
 
- // 如果工具执行成功，说明 Agent 在这条路径上走通了，清空所有失败计数器
- if !lastResult.IsError {
-        r.consecutiveFailures = make(map[string]int)
- return nil
-    }
+    def check_and_inject(self, last_tool_call: ToolCall, last_result: ToolResult) -> Optional[Message]:
+        """分析本轮的执行结果，决定是否要在 Context 尾部追加 Reminder。
+        返回的 Message 将作为最新的用户输入，强制大模型优先阅读。
+        """
+        fingerprint = generate_fingerprint(last_tool_call.name, last_tool_call.arguments)
 
- // 如果执行失败，累加该特征的失败次数
-    r.consecutiveFailures[fingerprint]++
-    failCount := r.consecutiveFailures[fingerprint]
+        # 如果工具执行成功，说明 Agent 在这条路径上走通了，清空所有失败计数器
+        if not last_result.is_error:
+            self.consecutive_failures = {}
+            return None
 
-    log.Printf("[Reminder] 监控到工具 %s 执行失败，该参数特征连续失败次数: %d\n", lastToolCall.Name, failCount)
+        # 如果执行失败，累加该特征的失败次数
+        fail_count = self.consecutive_failures.get(fingerprint, 0) + 1
+        self.consecutive_failures[fingerprint] = fail_count
 
- // 【驾驭底线】：触发死循环打断机制！
- // 我们设定阈值为 3 次。如果大模型连续 3 次都在同一个地方跌倒，必须强行打断它的局部执念。
- if failCount >= 3 {
-        log.Println("[Reminder] ⚠️ 触发死循环干预！注入强力修正指令。")
+        logger.info(
+            "[Reminder] 监控到工具 %s 执行失败，该参数特征连续失败次数: %d",
+            last_tool_call.name, fail_count,
+        )
 
- // 构造一条极其严厉的行动指南
-        nudgeMsg := fmt.Sprintf(`[SYSTEM REMINDER 警告] 
-你似乎陷入了死循环。你刚刚连续 %d 次使用相同的参数调用了 '%s' 工具，并且都失败了。
-请立即停止这种无效的重试！你的注意力被当前的报错过度吸引了。
-你需要：
-1. 停止猜测参数。跳出当前的局部思维。
-2. 彻底改变你的策略。
-3. 如果你确实无法通过系统工具解决当前问题，请直接结束任务并向用户说明你需要什么人工帮助，而不是继续盲目消耗 API 资源尝试。`, failCount, lastToolCall.Name)
+        # 【驾驭底线】：触发死循环打断机制！
+        # 我们设定阈值为 3 次。如果大模型连续 3 次都在同一个地方跌倒，必须强行打断它的局部执念。
+        if fail_count >= 3:
+            logger.warning("[Reminder] 触发死循环干预！注入强力修正指令。")
 
- return &schema.Message{
-            Role:    schema.RoleUser, // 【核心】必须是 RoleUser，以保证在下一次 API 请求时拥有最高的近因效应权重
-            Content: nudgeMsg,
-        }
-    }
+            # 构造一条极其严厉的行动指南
+            nudge_msg = (
+                "[SYSTEM REMINDER 警告]\n"
+                f"你似乎陷入了死循环。你刚刚连续 {fail_count} 次使用相同的参数调用了 "
+                f"'{last_tool_call.name}' 工具，并且都失败了。\n"
+                "请立即停止这种无效的重试！你的注意力被当前的报错过度吸引了。\n"
+                "你需要：\n"
+                "1. 停止猜测参数。跳出当前的局部思维。\n"
+                "2. 彻底改变你的策略。\n"
+                "3. 如果你确实无法通过系统工具解决当前问题，请直接结束任务并向用户说明你需要什么人工帮助，"
+                "而不是继续盲目消耗 API 资源尝试。"
+            )
+            # 【核心】必须是 Role.USER，以保证在下一次 API 请求时拥有最高的近因效应权重
+            return Message(role=Role.USER, content=nudge_msg)
 
- return nil
-}
+        return None
+
+
+def generate_fingerprint(tool_name: str, args: Any) -> str:
+    """为工具名和参数生成稳定指纹，用于识别重复失败。"""
+    hasher = hashlib.md5()
+    hasher.update(tool_name.encode("utf-8"))
+    hasher.update(_normalize_args(args))
+    return hasher.hexdigest()
+
+
+def _normalize_args(args: Any) -> bytes:
+    if args is None:
+        return b""
+    if isinstance(args, bytes):
+        return args
+    if isinstance(args, str):
+        return args.encode("utf-8")
+    try:
+        return json.dumps(args, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    except (TypeError, ValueError):
+        return str(args).encode("utf-8")
+
+
+def new_reminder_injector() -> ReminderInjector:
+    return ReminderInjector()
 ```
 
 ### 第 2 步：将 Reminder 机制缝合进 Main Loop
@@ -150,156 +165,140 @@ func (r *ReminderInjector) CheckAndInject(lastToolCall schema.ToolCall, lastResu
 现在，我们需要在 loop.go 中挂载这个探测器，并在每轮 Turn 结束、准备写入 Session 前进行结算和注入。
 
 打开 internal/engine/loop.go，在上一讲的基础上，增加对 injector 的调用：
-```
-// internal/engine/loop.go
-package engine
+```python
+# internal/engine/loop.py
+import logging
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Optional
 
-import (
- "context"
- "fmt"
- "log"
- "strings"
- "sync"
+from ..context.composer import PromptComposer
+from ..context.compactor import Compactor
+from ..context.recovery import RecoveryManager
+from ..provider.interface import LLMProvider
+from ..schema.message import Message, Role
+from ..tools.registry import Registry
+from .reportor import Reporter
+from .session import Session
+from .reminder import ReminderInjector
 
-    ctxpkg "github.com/yourname/go-tiny-claw/internal/context"
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/schema"
- "github.com/yourname/go-tiny-claw/internal/tools"
-)
 
-type AgentEngine struct {
-    provider       provider.LLMProvider
-    registry       tools.Registry
-    EnableThinking bool
-    PlanMode       bool
-    compactor      *ctxpkg.Compactor
-    recovery       *ctxpkg.RecoveryManager 
-    injector       *ReminderInjector // 【新增】提醒注入器
-}
+class AgentEngine:
+    """AgentEngine 是微型 OS 的核心驱动。"""
 
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool, planMode bool) *AgentEngine {
- return &AgentEngine{
-        provider:       p,
-        registry:       r,
-        EnableThinking: enableThinking,
-        PlanMode:       planMode,
-        compactor:      ctxpkg.NewCompactor(20000, 6),
-        recovery:       ctxpkg.NewRecoveryManager(),
-        injector:       NewReminderInjector(), // 【初始化注入器】
-    }
-}
+    def __init__(
+        self,
+        provider: LLMProvider,
+        registry: Registry,
+        enable_thinking: bool = False,
+        plan_mode: bool = False,
+    ) -> None:
+        self.provider = provider
+        self.registry = registry
+        self.enable_thinking = enable_thinking
+        self.plan_mode = plan_mode
+        self.compactor = Compactor(max_chars=20000, retain_last_msgs=6)
+        self.recovery = RecoveryManager()
+        self.reminder_injector = ReminderInjector()  # 【新增】提醒注入器
 
-func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter Reporter) error {
-    log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s (PlanMode: %v)\n", session.ID, session.WorkDir, e.PlanMode)
+    def run(self, user_prompt: str, session: Session, reporter: Optional[Reporter] = None) -> Optional[Exception]:
+        logging.info(
+            "[Engine] 唤醒会话 [%s]，锁定工作区: %s (PlanMode: %s)",
+            session.id, session.work_dir, self.plan_mode,
+        )
 
-    composer := ctxpkg.NewPromptComposer(session.WorkDir, e.PlanMode)
-    systemMsg := composer.Build()
+        composer = PromptComposer(session.work_dir, self.plan_mode)
+        system_msg = composer.build()
+        session.append(Message(role=Role.USER, content=user_prompt))
 
- for {
-        availableTools := e.registry.GetAvailableTools()
-        workingMemory := session.GetWorkingMemory(20)
+        while True:
+            available_tools = self.registry.get_available_tools()
+            working_memory = session.get_working_memory(20)
 
- var contextHistory []schema.Message
-        contextHistory = append(contextHistory, systemMsg)
-        contextHistory = append(contextHistory, workingMemory...)
-        compactedContext := e.compactor.Compact(contextHistory)
+            context_history: List[Message] = [system_msg]
+            context_history.extend(working_memory)
+            compacted_context = self.compactor.compact(context_history)
 
- var currentTurnThinkingContent string
+            current_turn_thinking_content = ""
 
- // ================= Phase 1: Thinking =================
- if e.EnableThinking {
- if reporter != nil { reporter.OnThinking(ctx) }
-            thinkResp, err := e.provider.Generate(ctx, compactedContext, nil)
- if err != nil {
- return fmt.Errorf("Thinking 阶段失败: %w", err)
-            }
- if thinkResp.Content != "" {
-                currentTurnThinkingContent = thinkResp.Content
-                compactedContext = append(compactedContext, *thinkResp)
-            }
-        }
+            # ================= Phase 1: Thinking =================
+            if self.enable_thinking:
+                if reporter:
+                    reporter.on_thinking()
+                think_resp = self.provider.generate(compacted_context, None)
+                if think_resp and think_resp.content:
+                    current_turn_thinking_content = think_resp.content
+                    compacted_context.append(think_resp)
 
- // ================= Phase 2: Action =================
-        actionResp, err := e.provider.Generate(ctx, compactedContext, availableTools)
- if err != nil {
- return fmt.Errorf("Action 阶段失败: %w", err)
-        }
+            # ================= Phase 2: Action =================
+            action_resp = self.provider.generate(compacted_context, available_tools)
 
-        finalAssistantMsg := schema.Message{
-            Role:      schema.RoleAssistant,
-            Content:   strings.TrimSpace(currentTurnThinkingContent + "\n" + actionResp.Content),
-            ToolCalls: actionResp.ToolCalls,
-        }
-        session.Append(finalAssistantMsg)
+            final_assistant_msg = Message(
+                role=Role.ASSISTANT,
+                content=(current_turn_thinking_content + "\n" + action_resp.content).strip(),
+                tool_calls=action_resp.tool_calls,
+            )
+            session.append(final_assistant_msg)
 
- if actionResp.Content != "" && reporter != nil {
-            reporter.OnMessage(ctx, actionResp.Content)
-        }
+            if action_resp.content and reporter:
+                reporter.on_message(action_resp.content)
 
- if len(actionResp.ToolCalls) == 0 {
- break
-        }
+            if not action_resp.tool_calls:
+                break
 
- // ================= 执行工具并记录 =================
-        observationMsgs := make([]schema.Message, len(actionResp.ToolCalls))
- var wg sync.WaitGroup
+            # ================= 执行工具并记录 =================
+            observation_msgs: List[Optional[Message]] = [None] * len(action_resp.tool_calls)
+            executed_tool_results: List[Optional[tuple]] = [None] * len(action_resp.tool_calls)
 
- // 用于收集本轮执行的最后一个工具，供 Reminder 探测器分析
- // (在真实的工业级架构中，如果并发调用了多个工具，我们可以逐个分析或仅分析报错的那个。这里简化为取第一个)
- var lastToolCall schema.ToolCall
- var lastToolResult schema.ToolResult
+            def execute_tool(idx: int, call) -> None:
+                if reporter:
+                    reporter.on_tool_call(call.name, str(call.arguments))
 
- for i, toolCall := range actionResp.ToolCalls {
-            wg.Add(1)
- go func(idx int, call schema.ToolCall) {
- defer wg.Done()
+                result = self.registry.execute(call)
+                executed_tool_results[idx] = (call, result)
 
- if reporter != nil { reporter.OnToolCall(ctx, call.Name, string(call.Arguments)) }
+                final_output = result.output
+                if result.is_error:
+                    final_output = self.recovery.analyze_and_inject(call.name, result.output)
 
-                result := e.registry.Execute(ctx, call)
+                if reporter:
+                    display_output = final_output
+                    if len(display_output) > 200:
+                        display_output = display_output[:200] + "... (已截断)"
+                    reporter.on_tool_result(call.name, display_output, result.is_error)
 
-                finalOutput := result.Output
- if result.IsError {
-                    finalOutput = e.recovery.AnalyzeAndInject(call.Name, result.Output)
-                }
+                observation_msgs[idx] = Message(
+                    role=Role.USER,
+                    content=final_output,
+                    tool_call_id=call.id,
+                )
 
- if reporter != nil {
-                    displayOutput := finalOutput
- if len(displayOutput) > 200 {
-                        displayOutput = displayOutput[:200] + "... (已截断)"
-                    }
-                    reporter.OnToolResult(ctx, call.Name, displayOutput, result.IsError)
-                }
+            with ThreadPoolExecutor(max_workers=len(action_resp.tool_calls)) as executor:
+                futures = [
+                    executor.submit(execute_tool, idx, tool_call)
+                    for idx, tool_call in enumerate(action_resp.tool_calls)
+                ]
+                for future in futures:
+                    future.result()
 
-                observationMsgs[idx] = schema.Message{
-                    Role:       schema.RoleUser,
-                    Content:    finalOutput,
-                    ToolCallID: call.ID,
-                }
+            # 1. 先将普通的工具执行结果存入 Session
+            for obs in observation_msgs:
+                if obs is not None:
+                    session.append(obs)
 
- // 捕获状态供外部探测器使用
- if idx == 0 {
-                    lastToolCall = call
-                    lastToolResult = result
-                }
-            }(i, toolCall)
-        }
-        wg.Wait()
+            # 2. 【核心防线】：在准备进入下一轮之前，进行死循环探测！
+            for executed in executed_tool_results:
+                if executed is None:
+                    continue
+                tool_call, tool_result = executed
+                reminder_msg = self.reminder_injector.check_and_inject(tool_call, tool_result)
+                if reminder_msg is not None:
+                    # 如果触发了干预规则，将这条严厉的提醒作为 User 消息，
+                    # 强制追加到 Session 的最末尾！
+                    # 大模型在下一轮被唤醒时，第一眼就会看到这句话，从而打破局部执念。
+                    session.append(reminder_msg)
+                    break
 
- // 1. 先将普通的工具执行结果存入 Session
-        session.Append(observationMsgs...)
-
- // 2. 【核心防线】：在准备进入下一轮之前，进行死循环探测！
-        reminderMsg := e.injector.CheckAndInject(lastToolCall, lastToolResult)
- if reminderMsg != nil {
- // 如果触发了干预规则，将这条严厉的提醒作为 User 消息，强制追加到 Session 的最末尾！
- // 大模型在下一轮被唤醒时，第一眼就会看到这句话，从而打破局部执念。
-            session.Append(*reminderMsg)
-        }
-    }
-
- return nil
-}
+        return None
 ```
 
 如此一来，我们在大模型“思考完毕、行动受挫”和“重燃执念再次思考”的空隙处，精妙地安插了一道“安全阀”。
@@ -309,66 +308,45 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 为了验证 System Reminders 是否生效，我们需要人为制造一个大模型永远无法靠自己解开的死局。
 
 我们在 cmd/claw/main.go 中，让它去执行一个百分之百会报错的的工具命令。并且在 Prompt 中使用极其强烈的语气去误导它，让它深信不疑地反复重试。
-```
-// cmd/claw/main.go
-package main
-
-import (
- "context"
- "log"
- "os"
-
-    ctxpkg "github.com/yourname/go-tiny-claw/internal/context"
- "github.com/yourname/go-tiny-claw/internal/engine"
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/schema"
- "github.com/yourname/go-tiny-claw/internal/tools"
+```python
+# cmd/claw/main_reminder.py
+from common import (
+    new_bash_tool,
+    new_edit_file_tool,
+    new_read_file_tool,
+    new_write_file_tool,
+    run_prompt_main,
 )
 
-func main() {
- if os.Getenv("ZHIPU_API_KEY") == "" {
-        log.Fatal("请先导出 ZHIPU_API_KEY 环境变量")
-    }
 
-    workDir, _ := os.Getwd()
-    workDir += "/workspace"
+def main() -> None:
+    prompt = """
+帮我读取当前目录下的 secret_key.txt。
+注意：我们的文件系统现在非常不稳定，经常报 File Not Found。
+如果报错了，请你【千万不要改变参数】，直接原样再次调用 read_file 尝试，直到成功或连续重试 5 次为止。
+"""
+    # 关闭 Plan 模式，让它在死胡同里专注地展示挣扎过程
+    run_prompt_main(
+        prompt=prompt,
+        tool_factories=[
+            new_read_file_tool,
+            new_write_file_tool,
+            new_bash_tool,
+            new_edit_file_tool,
+        ],
+        enable_thinking=False,
+    )
 
-    llmProvider := provider.NewZhipuOpenAIProvider("glm-4.5-air")
 
-    registry := tools.NewRegistry()
-    registry.Register(tools.NewReadFileTool(workDir))
-    registry.Register(tools.NewWriteFileTool(workDir))
-    registry.Register(tools.NewBashTool(workDir))
-    registry.Register(tools.NewEditFileTool(workDir))
-
- // 关闭 Plan 模式，让它在死胡同里专注地展示挣扎过程
-    eng := engine.NewAgentEngine(llmProvider, registry, false, false)
-    reporter := engine.NewTerminalReporter()
-
-    sessionID := "test_doom_loop_001"
-    sess := ctxpkg.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
-
-    prompt := `
-    帮我读取当前目录下的 secret_key.txt。
-    注意：我们的文件系统现在非常不稳定，经常报 File Not Found。
-    如果报错了，请你【千万不要改变参数】，直接原样再次调用 read_file 尝试，直到成功或连续重试 5 次为止。
-    `
-
-    log.Println("\n>>> 🚀 启动死循环干预测试...")
-    sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
-
-    err := eng.Run(context.Background(), sess, reporter)
- if err != nil {
-        log.Fatalf("引擎运行崩溃: %v", err)
-    }
-}
+if __name__ == "__main__":
+    main()
 ```
 
 ### 奇迹时刻：导师的“当头棒喝”
 
-在终端中执行 go run cmd/claw/main.go。你将看到一场精彩的“人机博弈”：
+在终端中执行 python cmd/claw/main_reminder.py。你将看到一场精彩的“人机博弈”：
 ```
-$go run cmd/claw/main.go 
+$python cmd/claw/main_reminder.py 
 2026/04/12 17:40:47 [Registry] 成功挂载工具: read_file
 2026/04/12 17:40:47 [Registry] 成功挂载工具: write_file
 2026/04/12 17:40:47 [Registry] 成功挂载工具: bash
@@ -473,6 +451,6 @@ $go run cmd/claw/main.go
 
 这三次调用在我们的 Hash 算法中生成的指纹是完全不同的！因此我们设定的死循环干预将不会触发！
 
-如果你是底层的 Harness 架构师，并且只能在 Go 代码层面进行改造（不引入额外的 LLM 语义判断以节省成本），你会如何改进 ReminderInjector 中的参数规范化（Normalization）逻辑，让它能够精准“看穿”大模型的这种微小差异重试，捕获“本质上的”死循环？
+如果你是底层的 Harness 架构师，并且只能在 Python 代码层面进行改造（不引入额外的 LLM 语义判断以节省成本），你会如何改进 ReminderInjector 中的参数规范化（Normalization）逻辑，让它能够精准“看穿”大模型的这种微小差异重试，捕获“本质上的”死循环？
 
 欢迎在留言区分享你的哈希降级或正则优化方案，如果你觉得有所收获也欢迎你分享给其他朋友。我们下一讲，开启高危操作的物理拦截防线！

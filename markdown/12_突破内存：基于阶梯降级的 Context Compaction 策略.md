@@ -46,31 +46,29 @@ Working Memory（短期工作记忆）：最近的N轮对话。我们期望它�
 
 ## 代码实战：实现 Context Compactor（内存压缩器）
 
-接下来，我们将用 Go 语言实现这把外科手术刀，并把它无缝插入到我们的 Main Loop 中。
+接下来，我们将用 Python 语言实现这把外科手术刀，并把它无缝插入到我们的 Main Loop 中。
 
 ### 目录结构回顾与更新
 
-我们在 internal/context 目录下，新增 compactor.go。
+我们在 internal/context 目录下，新增 compactor.py。
 ```
-go-tiny-claw/
+tiny-claw/
 ├── cmd/
 │   └── claw/
-│       └── main.go          # 【修改】注入 Compactor，并模拟 OOM 场景测试
+│       └── main.py          # 【修改】注入 Compactor，并模拟 OOM 场景测试
 ├── internal/
 │   ├── context/             # 【上下文工程体系模块】
-│   │   ├── composer.go      # 保持不变
-│   │   ├── skill.go         # 保持不变
-│   │   └── compactor.go     # 【新增】上下文压缩与内存回收器
+│   │   ├── composer.py      # 保持不变
+│   │   ├── skill.py         # 保持不变
+│   │   └── compactor.py     # 【新增】上下文压缩与内存回收器
 │   ├── engine/
-│   │   ├── loop.go          # 【修改】在向 Provider 发送前，调用 Compactor
-│   │   ├── session.go       # 保持不变
-│   │   └── reporter.go      
+│   │   ├── loop.py          # 【修改】在向 Provider 发送前，调用 Compactor
+│   │   ├── session.py       # 保持不变
+│   │   └── reporter.py      
 │   ├── feishu/              
 │   ├── provider/            
 │   ├── schema/              
 │   └── tools/               
-├── go.mod
-└── go.sum
 ```
 
 ### 第 1 步：实现双重降级压缩逻辑
@@ -79,239 +77,226 @@ go-tiny-claw/
 
 为了保持架构极简并降低外部依赖，我们采用字符数量（Char Count）作为内存压力的估算指标（通常对于英文字符，1 token ≈ 4 字符；中文字符 1 token ≈ 1.5 字符）。
 
-新建 internal/context/compactor.go：
-```
-// internal/context/compactor.go
-package context
+新建 internal/context/compactor.py：
+```python
+# internal/context/compactor.py
+import logging
+from dataclasses import replace
 
-import (
- "fmt"
- "log"
+from internal.schema.message import Message, Role
 
- "github.com/yourname/go-tiny-claw/internal/schema"
-)
+logger = logging.getLogger(__name__)
 
-// Compactor 负责监控和压缩上下文内存，防止大模型发生 OOM
-type Compactor struct {
-    MaxChars       int // 触发压缩的最大字符数阈值 (水位线，可参考使用的大模型的token窗口大小)
-    RetainLastMsgs int // Working Memory 保护区：最近的 N 条消息
-}
 
-func NewCompactor(maxChars int, retainLastMsgs int) *Compactor {
- return &Compactor{
-        MaxChars:       maxChars,
-        RetainLastMsgs: retainLastMsgs,
-    }
-}
+class Compactor:
+    """Compactor 负责监控和压缩上下文内存，防止大模型发生 OOM。"""
 
-// Compact 接收准备发送给大模型的消息数组。
-// 如果总长度超标，对远期历史区进行全量掩码 (Masking)，对短期保护区进行超长局部截断 (Truncation)。
-func (c *Compactor) Compact(msgs []schema.Message) []schema.Message {
-    currentLength := c.estimateLength(msgs)
+    def __init__(self, max_chars: int, retain_last_msgs: int) -> None:
+        # 触发压缩的最大字符数阈值 (水位线，可参考使用的大模型的token窗口大小)
+        self.max_chars = max_chars
+        # Working Memory 保护区：最近的 N 条消息
+        self.retain_last_msgs = retain_last_msgs
 
- // 如果没有超过水位线，直接返回原数组 (大多数情况下的正常路径)
- if currentLength < c.MaxChars {
- return msgs
-    }
+    def compact(self, msgs: list[Message]) -> list[Message]:
+        """接收准备发送给大模型的消息数组。
+        如果总长度超标，对远期历史区进行全量掩码 (Masking)，
+        对短期保护区进行超长局部截断 (Truncation)。
+        """
+        current_length = self._estimate_length(msgs)
 
-    log.Printf("[Compactor] ⚠️ 内存告警：当前上下文长度 (%d 字符) 超过阈值 (%d)，触发压缩清理...\n", currentLength, c.MaxChars)
+        # 如果没有超过水位线，直接返回原数组 (大多数情况下的正常路径)
+        if current_length < self.max_chars:
+            return msgs
 
- var compacted []schema.Message
-    msgCount := len(msgs)
+        logger.warning(
+            "[Compactor] ⚠️ 内存告警：当前上下文长度 (%d 字符) 超过阈值 (%d)，触发压缩清理...",
+            current_length,
+            self.max_chars,
+        )
 
- // 计算受保护的 Working Memory 起始索引
-    protectStartIndex := msgCount - c.RetainLastMsgs
- if protectStartIndex < 0 {
-        protectStartIndex = 0
-    }
+        compacted: list[Message] = []
+        msg_count = len(msgs)
 
- for i, msg := range msgs {
- // 1. 系统提示词 (System Prompt) 绝对不能动，直接保留
- if msg.Role == schema.RoleSystem {
-            compacted = append(compacted, msg)
- continue
-        }
+        # 计算受保护的 Working Memory 起始索引
+        protect_start_index = max(0, msg_count - self.retain_last_msgs)
 
- // 我们必须拷贝一份新消息，因为在并发环境中直接修改原引用可能导致底层数据结构被污染
-        newMsg := msg 
+        for i, msg in enumerate(msgs):
+            # 1. 系统提示词 (System Prompt) 绝对不能动，直接保留
+            if msg.role == Role.SYSTEM:
+                compacted.append(msg)
+                continue
 
-        isInWorkingMemory := i >= protectStartIndex
+            # 我们必须拷贝一份新消息，因为在并发环境中直接修改原引用可能导致底层数据结构被污染
+            new_msg = replace(msg)
 
- // 【核心驾驭逻辑】: 双重降级防线
- if msg.Role == schema.RoleUser && msg.ToolCallID != "" {
- // 对于工具的返回结果 (Observation/ToolResult)
- if !isInWorkingMemory {
- // 【第一道防线：远期历史】如果是早期对话，执行无情替换 (Full Masking)
- if len(msg.Content) > 200 {
-                    newMsg.Content = fmt.Sprintf("...[为了节省内存，早期的工具输出已被系统强制清理。原始长度: %d 字节]...", len(msg.Content))
-                }
-            } else {
- // 【第二道防线：短期记忆】即使处于近期保护区，只要单条内容过大，也必须截断防 OOM (Head-Tail Truncation)
- // 我们保留前 500 字符和后 500 字符（掐头去尾法，大模型通常只需要看开头报错和结尾总结）
- const maxKeep = 1000
- if len(msg.Content) > maxKeep {
-                    head := msg.Content[:500]
-                    tail := msg.Content[len(msg.Content)-500:]
-                    newMsg.Content = fmt.Sprintf("%s\n\n...[内容过长，中间 %d 字节已被系统截断]...\n\n%s", head, len(msg.Content)-maxKeep, tail)
-                }
-            }
-        } else if msg.Role == schema.RoleAssistant && msg.Content != "" {
- // 对于大模型的冗长推理废话 (Thinking Trace)
- if !isInWorkingMemory && len(msg.Content) > 200 {
-                newMsg.Content = "...[早期的推理思考过程已折叠]..."
-            }
-        }
+            is_in_working_memory = i >= protect_start_index
 
- // 注意：我们绝不会去动 msg.ToolCalls，因为这是模型行动的证据，是维系逻辑链的关键！
-        compacted = append(compacted, newMsg)
-    }
+            # 【核心驾驭逻辑】: 双重降级防线
+            if msg.role == Role.USER and msg.tool_call_id:
+                # 对于工具的返回结果 (Observation/ToolResult)
+                if not is_in_working_memory:
+                    # 【第一道防线：远期历史】如果是早期对话，执行无情替换 (Full Masking)
+                    if len(msg.content) > 200:
+                        new_msg.content = (
+                            f"...[为了节省内存，早期的工具输出已被系统强制清理。"
+                            f"原始长度: {len(msg.content)} 字节]..."
+                        )
+                else:
+                    # 【第二道防线：短期记忆】即使处于近期保护区，只要单条内容过大，也必须截断防 OOM (Head-Tail Truncation)
+                    # 我们保留前 500 字符和后 500 字符（掐头去尾法，大模型通常只需要看开头报错和结尾总结）
+                    max_keep = 1000
+                    if len(msg.content) > max_keep:
+                        head = msg.content[:500]
+                        tail = msg.content[-500:]
+                        new_msg.content = (
+                            f"{head}\n\n"
+                            f"...[内容过长，中间 {len(msg.content) - max_keep} 字节已被系统截断]...\n\n"
+                            f"{tail}"
+                        )
+            elif msg.role == Role.ASSISTANT and msg.content:
+                # 对于大模型的冗长推理废话 (Thinking Trace)
+                if not is_in_working_memory and len(msg.content) > 200:
+                    new_msg.content = "...[早期的推理思考过程已折叠]..."
 
-    newLength := c.estimateLength(compacted)
-    log.Printf("[Compactor] ✅ 压缩完成。上下文长度从 %d 降至 %d 字符。\n", currentLength, newLength)
+            # 注意：我们绝不会去动 msg.tool_calls，因为这是模型行动的证据，是维系逻辑链的关键！
+            compacted.append(new_msg)
 
- return compacted
-}
+        new_length = self._estimate_length(compacted)
+        logger.info(
+            "[Compactor] ✅ 压缩完成。上下文长度从 %d 降至 %d 字符。",
+            current_length,
+            new_length,
+        )
 
-// estimateLength 粗略计算当前上下文的总字符长度
-func (c *Compactor) estimateLength(msgs []schema.Message) int {
-    length := 0
- for _, msg := range msgs {
-        length += len(msg.Content)
- for _, tc := range msg.ToolCalls {
-            length += len(tc.Name) + len(tc.Arguments)
-        }
-    }
- return length
-}
+        return compacted
+
+    def _estimate_length(self, msgs: list[Message]) -> int:
+        """粗略计算当前上下文的总字符长度。"""
+        length = 0
+        for msg in msgs:
+            length += len(msg.content)
+            for tc in msg.tool_calls or []:
+                length += len(tc.name) + len(str(tc.arguments))
+        return length
 ```
 
 ### 第 2 步：将 Compactor 注入到核心引擎
 
 现在，我们需要让这台“垃圾回收器”在核心循环中跑起来。
 
-打开 internal/engine/loop.go，在 AgentEngine 结构体中引入 Compactor，并在每次发起推理前调用它对上下文进行“洗礼”。
-```
-// internal/engine/loop.go
-package engine
+打开 internal/engine/loop.py，在 AgentEngine 类中引入 Compactor，并在每次发起推理前调用它对上下文进行”洗礼”。
+```python
+# internal/engine/loop.py
+import logging
+from concurrent.futures import ThreadPoolExecutor
+from typing import List, Optional
 
-import (
- "context"
- "fmt"
- "log"
- "sync"
+from internal.context.compactor import Compactor
+from internal.context.composer import PromptComposer
+from internal.engine.reportor import Reporter
+from internal.engine.session import Session
+from internal.provider.interface import LLMProvider
+from internal.schema.message import Message, Role
+from internal.tools.registry import Registry
 
-    ctxpkg "github.com/yourname/go-tiny-claw/internal/context"
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/schema"
- "github.com/yourname/go-tiny-claw/internal/tools"
-)
 
-type AgentEngine struct {
-    provider       provider.LLMProvider
-    registry       tools.Registry
-    EnableThinking bool
-    composer       *ctxpkg.PromptComposer
-    compactor      *ctxpkg.Compactor // 【新增】压缩器实例
-}
+class AgentEngine:
+    """AgentEngine 是微型 OS 的核心驱动。"""
 
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, enableThinking bool) *AgentEngine {
- return &AgentEngine{
-        provider:       p,
-        registry:       r,
-        EnableThinking: enableThinking,
- // (假装这里能获取到 WorkDir 初始化 Composer，生产环境中应在 Run 中动态构造)
-        composer:       ctxpkg.NewPromptComposer("."), 
- // 【初始化压缩器】：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
- // 并保护最近的 6 条消息（大约两轮 Turn 的交互）
-        compactor:      ctxpkg.NewCompactor(3000, 6), 
-    }
-}
+    def __init__(self, provider: LLMProvider, registry: Registry, enable_thinking: bool = False):
+        self.provider = provider
+        self.registry = registry
+        self.enable_thinking = enable_thinking
+        self.composer: Optional[PromptComposer] = None
+        # 【新增】压缩器实例
+        # 【初始化压缩器】：为了便于今天的极端测试，我们将水位线阈值设积极（例如 3000 字符），
+        # 并保护最近的 6 条消息（大约两轮 Turn 的交互）
+        self.compactor = Compactor(max_chars=3000, retain_last_msgs=6)
 
-func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter Reporter) error {
-    log.Printf("[Engine] 唤醒会话 [%s]，锁定工作区: %s\n", session.ID, session.WorkDir)
+    def run(self, session: Session, reporter: Optional[Reporter] = None) -> Optional[Exception]:
+        logging.info(f"[Engine] 唤醒会话 [{session.id}]，锁定工作区: {session.work_dir}")
 
-    e.composer = ctxpkg.NewPromptComposer(session.WorkDir)
-    systemMsg := e.composer.Build()
+        self.composer = PromptComposer(session.work_dir)
+        system_msg = self.composer.build()
 
- for {
-        availableTools := e.registry.GetAvailableTools()
+        while True:
+            available_tools = self.registry.get_available_tools()
 
- // 1. 从 Session 提取出近期的 Working Memory (例如最近 20 条，给压缩器留下充足的判断空间)
-        workingMemory := session.GetWorkingMemory(20) 
+            # 1. 从 Session 提取出近期的 Working Memory (例如最近 20 条，给压缩器留下充足的判断空间)
+            working_memory = session.get_working_memory(20)
 
- var contextHistory []schema.Message
-        contextHistory = append(contextHistory, systemMsg)
-        contextHistory = append(contextHistory, workingMemory...)
+            context_history = [system_msg]
+            context_history.extend(working_memory)
 
- // 2. 【核心注入点】: 在向 Provider 发起推理前，过一遍内存压缩器！
- // 无论你带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
-        compactedContext := e.compactor.Compact(contextHistory)
+            # 2. 【核心注入点】: 在向 Provider 发起推理前，过一遍内存压缩器！
+            # 无论你带出了多少上下文，如果字符总数超标，早期日志将被掩码化，超大日志将被掐头去尾
+            compacted_context = self.compactor.compact(context_history)
 
- // 3. 后续的 Provider.Generate 全面使用被保护过的新鲜上下文 (compactedContext)
- // ================= Phase 1: Thinking =================
- if e.EnableThinking {
- if reporter != nil { reporter.OnThinking(ctx) }
-            thinkResp, err := e.provider.Generate(ctx, compactedContext, nil)
- if err != nil {
- return fmt.Errorf("Thinking 阶段失败: %w", err)
-            }
- if thinkResp.Content != "" {
-                session.Append(*thinkResp)
-                compactedContext = append(compactedContext, *thinkResp)
-            }
-        }
+            # 3. 后续的 Provider.generate 全面使用被保护过的新鲜上下文 (compacted_context)
+            # ================= Phase 1: Thinking =================
+            if self.enable_thinking:
+                if reporter:
+                    reporter.on_thinking()
+                try:
+                    think_resp = self.provider.generate(compacted_context, None)
+                except Exception as e:
+                    return RuntimeError(f"Thinking 阶段失败: {e}")
+                if think_resp.content:
+                    session.append(think_resp)
+                    compacted_context.append(think_resp)
 
- // ================= Phase 2: Action =================
-        actionResp, err := e.provider.Generate(ctx, compactedContext, availableTools)
- if err != nil {
- return fmt.Errorf("Action 阶段失败: %w", err)
-        }
+            # ================= Phase 2: Action =================
+            try:
+                action_resp = self.provider.generate(compacted_context, available_tools)
+            except Exception as e:
+                return RuntimeError(f"Action 阶段失败: {e}")
 
- // 【驾驭精髓】：注意，写入 Session（硬盘/全量内存）的永远是全量的真实响应，不受 Compact 影响！
- // Compact 只作用于本轮发给大模型的那个临时 Context。
-        session.Append(*actionResp) 
-        compactedContext = append(compactedContext, *actionResp)
+            # 【驾驭精髓】：注意，写入 Session（硬盘/全量内存）的永远是全量的真实响应，不受 Compact 影响！
+            # Compact 只作用于本轮发给大模型的那个临时 Context。
+            session.append(action_resp)
+            compacted_context.append(action_resp)
 
- if actionResp.Content != "" && reporter != nil {
-            reporter.OnMessage(ctx, actionResp.Content)
-        }
+            if action_resp.content and reporter is not None:
+                reporter.on_message(action_resp.content)
 
- // ... (执行工具与并发逻辑，与上一讲完全一致) ...
- if len(actionResp.ToolCalls) == 0 {
- break
-        }
+            # ... (执行工具与并发逻辑，与上一讲完全一致) ...
+            if not action_resp.tool_calls:
+                break
 
-        observationMsgs := make([]schema.Message, len(actionResp.ToolCalls))
- var wg sync.WaitGroup
+            observation_msgs: List[Optional[Message]] = [None] * len(action_resp.tool_calls)
 
- for i, toolCall := range actionResp.ToolCalls {
-            wg.Add(1)
- go func(idx int, call schema.ToolCall) {
- defer wg.Done()
- if reporter != nil { reporter.OnToolCall(ctx, call.Name, string(call.Arguments)) }
+            def execute_tool(idx: int, call) -> None:
+                if reporter:
+                    reporter.on_tool_call(call.name, str(call.arguments))
 
-                result := e.registry.Execute(ctx, call)
+                result = self.registry.execute(call)
 
- if reporter != nil {
-                    displayOutput := result.Output
- if len(displayOutput) > 200 { displayOutput = displayOutput[:200] + "... (已截断)" }
-                    reporter.OnToolResult(ctx, call.Name, displayOutput, result.IsError)
-                }
-                observationMsgs[idx] = schema.Message{
-                    Role:       schema.RoleUser,
-                    Content:    result.Output,
-                    ToolCallID: call.ID,
-                }
-            }(i, toolCall)
-        }
-        wg.Wait()
+                if reporter:
+                    display_output = result.output
+                    if len(display_output) > 200:
+                        display_output = display_output[:200] + "... (已截断)"
+                    reporter.on_tool_result(call.name, display_output, result.is_error)
 
- // 将全量观测结果持久化到 Session 中
-        session.Append(observationMsgs...)
-    }
+                observation_msgs[idx] = Message(
+                    role=Role.USER,
+                    content=result.output,
+                    tool_call_id=call.id,
+                )
 
- return nil
-}
+            with ThreadPoolExecutor(max_workers=len(action_resp.tool_calls)) as executor:
+                futures = [
+                    executor.submit(execute_tool, idx, tool_call)
+                    for idx, tool_call in enumerate(action_resp.tool_calls)
+                ]
+                for future in futures:
+                    future.result()
+
+            # 将全量观测结果持久化到 Session 中
+            completed = [obs for obs in observation_msgs if obs is not None]
+            if completed:
+                session.append(*completed)
+
+        return None
 ```
 
 这段代码精巧地划清了物理边界：全量的原始数据被忠实地保存在 Session 中供人类随时翻阅回溯；而每次向昂贵且脆弱的大模型 API 发起请求时，它都会带上一副经过 Compactor 过滤和修剪过的“有色眼镜”。
@@ -326,63 +311,69 @@ func (e *AgentEngine) Run(ctx context.Context, session *ctxpkg.Session, reporter
 yes "这是一段极其冗长的、无意义的服务器报错日志信息，用来模拟 OOM 场景" | head -n 2000 > mock_log.txt
 ```
 
-然后在 cmd/claw/main.go 中，向引擎下达包含多个步骤的连续指令：
-```
-// cmd/claw/main.go
-package main
+然后在 cmd/claw/main.py 中，向引擎下达包含多个步骤的连续指令：
+```python
+# cmd/claw/main.py
+import logging
+import os
+import sys
 
-import (
- "context"
- "log"
- "os"
+# 将项目根目录添加到 sys.path
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..'))
 
-    ctxpkg "github.com/yourname/go-tiny-claw/internal/context"
- "github.com/yourname/go-tiny-claw/internal/engine"
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/tools"
- "github.com/yourname/go-tiny-claw/internal/schema"
-)
+from internal.engine.session import GlobalSessionMgr
+from internal.engine.loop import AgentEngine
+from internal.engine.terminal_reporter import TerminalReporter
+from internal.provider.openai import OpenAIProvider
+from internal.schema.message import Message, Role
+from internal.tools.registry import ToolRegistry
+from internal.tools.readfile import ReadFileTool
+from internal.tools.write import WriteFileTool
+from internal.tools.Bash import BashTool
 
-func main() {
- if os.Getenv("ZHIPU_API_KEY") == "" {
-        log.Fatal("请先导出 ZHIPU_API_KEY 环境变量")
-    }
 
-    workDir, _ := os.Getwd()
-    llmProvider := provider.NewZhipuOpenAIProvider("glm-4.5-air")
+def main():
+    if not os.environ.get("ZHIPU_API_KEY"):
+        logging.critical("请先导出 ZHIPU_API_KEY 环境变量")
+        return
 
-    registry := tools.NewRegistry()
-    registry.Register(tools.NewReadFileTool(workDir))
-    registry.Register(tools.NewWriteFileTool(workDir))
-    registry.Register(tools.NewBashTool(workDir))
+    work_dir = os.getcwd()
+    llm_provider = OpenAIProvider(model="glm-4.5-air")
 
- // 实例化引擎 (关闭思考模式以提速)
-    eng := engine.NewAgentEngine(llmProvider, registry, false) 
-    reporter := engine.NewTerminalReporter()
+    registry = ToolRegistry()
+    registry.register(ReadFileTool(work_dir))
+    registry.register(WriteFileTool(work_dir))
+    registry.register(BashTool(work_dir))
 
-    sessionID := "test_oom_protection_001"
-    sess := ctxpkg.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
+    # 实例化引擎 (关闭思考模式以提速)
+    eng = AgentEngine(llm_provider, registry, enable_thinking=False)
+    reporter = TerminalReporter()
 
- // 发起一个会导致读取大文件的恶意任务
-    prompt := `
+    session_id = "test_oom_protection_001"
+    sess = GlobalSessionMgr.get_or_create(session_id, work_dir)
+
+    # 发起一个会导致读取大文件的恶意任务
+    prompt = """
     请帮我执行以下三个步骤：
     1. 使用 bash 执行 echo "开始排查日志"
     2. 使用 read_file 工具读取当前目录下的巨大文件 mock_log.txt
     3. 使用 bash 执行 date 命令获取当前时间，并告诉我任务全部完成。
-    `
+    """
 
-    sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
+    sess.append(Message(role=Role.USER, content=prompt))
 
-    err := eng.Run(context.Background(), sess, reporter)
- if err != nil {
-        log.Fatalf("引擎运行崩溃: %v", err)
-    }
-}
+    err = eng.run(sess, reporter)
+    if err:
+        logging.critical(f"引擎运行崩溃: {err}")
+
+
+if __name__ == "__main__":
+    main()
 ```
 
 ### 奇迹时刻：OOM Killer 完美介入
 
-在终端中执行启动命令 go run cmd/claw/main.go。你将看到类似如下的日志输出：
+在终端中执行启动命令 python cmd/claw/main.py。你将看到类似如下的日志输出：
 ```
 2026/04/12 20:59:01 [Registry] 成功挂载工具: read_file
 2026/04/12 20:59:01 [Registry] 成功挂载工具: bash

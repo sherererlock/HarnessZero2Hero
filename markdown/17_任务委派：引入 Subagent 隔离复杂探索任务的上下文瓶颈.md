@@ -1,18 +1,18 @@
 你好，我是 Tony Bai。欢迎来到《从 0 开始构建 Agent Harness》专栏的第十七讲。
 
-在过去的 16 讲中，我们为 go-tiny-claw 打造了全方位的生存能力：通过阶梯掩码（Compactor）管理了内存，通过 TODO.md等 持久化了记忆，通过 Reminder 和 Middleware 构建了防走神和防删库的安全屏障。
+在过去的 16 讲中，我们为 tiny-claw 打造了全方位的生存能力：通过阶梯掩码（Compactor）管理了内存，通过 TODO.md等 持久化了记忆，通过 Reminder 和 Middleware 构建了防走神和防删库的安全屏障。
 
 它现在就像一个极其靠谱的“单兵特种兵”。但是，特种兵再强，终究是一个人。
 
-当你遇到一个极其庞大、充满未知领域的长程任务时，比如：“请帮我阅读完这个 5 万行的开源 C++ 项目源码，理解它的权限校验逻辑，然后把它翻译成 Go 语言。”
+当你遇到一个极其庞大、充满未知领域的长程任务时，比如：”请帮我阅读完这个 5 万行的开源 C++ 项目源码，理解它的权限校验逻辑，然后把它翻译成 Python 语言。”
 
 如果你的 Agent 只有一条命（一个 Main Loop 线程），它可能最终会陷入“崩溃”。哪怕我们有 Compactor 机制，大模型依然需要在一轮轮的 ReAct 循环中，使用 read_file 翻阅成百上千个文件，使用 bash 调用 grep 搜索关键词。
 
-在这个漫长的“探索”阶段，主线程的上下文会被海量的尝试、报错、无关的代码片段塞满。最终，当它终于找到关键代码，准备开始“写代码”时，它可能早就忘记了你最初要求它“翻译成 Go 语言”的那个小细节了。
+在这个漫长的“探索”阶段，主线程的上下文会被海量的尝试、报错、无关的代码片段塞满。最终，当它终于找到关键代码，准备开始“写代码”时，它可能早就忘记了你最初要求它”翻译成 Python 语言”的那个小细节了。
 
 在 Harness 驾驭工程中，突破单体大模型能力天花板的解法，就是向现代企业管理学习：任务委派（Delegation）与多智能体（Multi-Agent / Subagent）架构。
 
-今天，我们将为 go-tiny-claw 引入一个令人兴奋的高阶特性：通过实现一个特殊的工具，让主 Agent 能够根据需要，随时随地拉起一个受限隔离的“子智能体（Subagent）”去帮它干脏活累活！
+今天，我们将为 tiny-claw 引入一个令人兴奋的高阶特性：通过实现一个特殊的工具，让主 Agent 能够根据需要，随时随地拉起一个受限隔离的“子智能体（Subagent）”去帮它干脏活累活！
 
 ## 为什么需要 Subagent 物理隔离？
 
@@ -38,239 +38,245 @@
 
 ## 代码实战：实现 spawn_subagent 工具
 
-接下来，我们将用 Go 语言将这个迷人的理念转化为现实。
+接下来，我们将用 Python 语言将这个迷人的理念转化为现实。
 
 ### 目录结构回顾与更新
 
-我们将所有的多智能体相关代码，都优雅地封装在 internal/tools/subagent.go 中，并引入一个新的抽象接口 AgentRunner，让 Tool 可以安全地拉起 Engine。
+我们将所有的多智能体相关代码，都优雅地封装在 internal/tools/subagent.py 中，并引入一个新的抽象接口 AgentRunner，让 Tool 可以安全地拉起 Engine。
 ```
-go-tiny-claw/
+tiny-claw/
 ├── cmd/
 │   └── claw/
-│       └── main.go          # 【修改】挂载 subagent 工具，发起协同任务
+│       └── main_subagent.py     # 【修改】挂载 subagent 工具，发起协同任务
 ├── internal/
 │   ├── engine/
-│   │   ├── loop.go          # 【修改】增加 RunSub 接口实现，专用于受限的子循环
+│   │   ├── loop.py              # 【修改】增加 run_sub 接口实现，专用于受限的子循环
 │   │   └── ...
-│   ├── feishu/              # 保持不变
-│   ├── provider/            # 保持不变
-│   ├── schema/              # 保持不变
-│   └── tools/               
-│       ├── registry.go      
-│       ├── read_file.go     
-│       ├── subagent.go      # 【新增】拉起子智能体的特殊套娃工具
+│   ├── feishu/                  # 保持不变
+│   ├── provider/                # 保持不变
+│   ├── schema/                  # 保持不变
+│   └── tools/                   
+│       ├── registry.py          
+│       ├── readfile.py          
+│       ├── subagent.py          # 【新增】拉起子智能体的特殊套娃工具
 │       └── ...
-├── go.mod
-└── go.sum
+└── workspace/
 ```
 
 ### 第 1 步：定义 SubagentTool 及防污染机制
 
-新建 internal/tools/subagent.go。我们需要在这里做一些“套娃”操作。
+新建 internal/tools/subagent.py。我们需要在这里做一些”套娃”操作。
 
 为了拉起一个新的 AgentEngine，这个工具在被初始化时，必须拿到大模型的 Provider 和当前工作区的信息。
 
-更关键的是，为了防止子智能体乱搞破坏（比如误删文件），我们在把它丢出去探索时，通常只会给它挂载“只读”工具（如 read_file、bash），绝对不给它发 edit_file。这也是驾驭工程中限制“爆炸半径（Blast Radius）”的经典做法。
-```
-// internal/tools/subagent.go
-package tools
+更关键的是，为了防止子智能体乱搞破坏（比如误删文件），我们在把它丢出去探索时，通常只会给它挂载”只读”工具（如 read_file、bash），绝对不给它发 edit_file。这也是驾驭工程中限制”爆炸半径（Blast Radius）”的经典做法。
+```python
+# internal/tools/subagent.py
+import logging
+from typing import Any, Protocol
 
-import (
- "context"
- "encoding/json"
- "fmt"
- "log"
+from ..schema.message import ToolDefinition
+from .registry import BaseTool, Registry
 
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/schema"
-)
 
-// AgentRunner 是一个打破循环依赖的抽象接口。
-// 因为 SubagentTool 存在于 tools 包，而完整的 AgentEngine 存在于 engine 包。
-// 为了让 Tool 能拉起 Engine，我们定义一个接口供外部注入。
-type AgentRunner interface {
- // RunSub 启动一个匿名的、一次性的子智能体任务，并返回其最终梳理出的纯文本总结
-    RunSub(ctx context.Context, taskPrompt string, readOnlyRegistry Registry, reporter interface{}) (string, error)
-}
+# AgentRunner 是一个打破循环依赖的抽象接口。
+# 因为 SubagentTool 存在于 tools 包，而完整的 AgentEngine 存在于 engine 包。
+# 为了让 Tool 能拉起 Engine，我们定义一个 Protocol 供外部注入。
+class AgentRunner(Protocol):
+    # run_sub 启动一个匿名的、一次性的子智能体任务，并返回其最终梳理出的纯文本总结
+    def run_sub(
+        self,
+        task_prompt: str,
+        read_only_registry: “Registry”,
+        reporter: Any,
+    ) -> str:
+        ...
 
-type SubagentTool struct {
-    runner AgentRunner
 
- // 为子智能体准备的专属、受限的“只读”注册表
-    readOnlyRegistry Registry 
-    reporter         interface{} // 暂时用 interface 规避包循环依赖，底层通过断言使用
-}
+class SubagentTool(BaseTool):
+    “””派出只读子智能体做深度探索，再回收摘要报告。”””
 
-// NewSubagentTool 构造函数
-func NewSubagentTool(runner AgentRunner, readOnlyRegistry Registry, reporter interface{}) *SubagentTool {
- return &SubagentTool{
-        runner:           runner,
-        readOnlyRegistry: readOnlyRegistry,
-        reporter:         reporter,
-    }
-}
+    def __init__(
+        self,
+        runner: AgentRunner,
+        read_only_registry: Registry,
+        reporter: Any,
+    ):
+        self.runner = runner
+        # 为子智能体准备的专属、受限的”只读”注册表
+        self.read_only_registry = read_only_registry
+        # 暂时用 Any 规避包循环依赖，底层通过属性访问使用
+        self.reporter = reporter
 
-func (t *SubagentTool) Name() string {
- return "spawn_subagent"
-}
+    def name(self) -> str:
+        return “spawn_subagent”
 
-// Definition 向主 Agent 暴露这个工具的强大能力
-func (t *SubagentTool) Definition() schema.ToolDefinition {
- return schema.ToolDefinition{
-        Name:        t.Name(),
-        Description: "派出一个专门用于深度探索（Exploration）的子智能体。当你需要阅读大量代码、跨文件查找逻辑时请调用此工具。它在探索完毕后，会给你返回一份极度精炼的摘要报告。",
-        InputSchema: map[string]interface{}{
- "type": "object",
- "properties": map[string]interface{}{
- "task_prompt": map[string]interface{}{
- "type":        "string",
- "description": "给子智能体下达的明确指令。",
+    # definition 向主 Agent 暴露这个工具的强大能力
+    def definition(self) -> ToolDefinition:
+        return ToolDefinition(
+            name=self.name(),
+            description=(
+                “派出一个专门用于深度探索（Exploration）的子智能体。”
+                “当你需要阅读大量代码、跨文件查找逻辑时请调用此工具。”
+                “它在探索完毕后，会给你返回一份极度精炼的摘要报告。”
+            ),
+            input_schema={
+                “type”: “object”,
+                “properties”: {
+                    “task_prompt”: {
+                        “type”: “string”,
+                        “description”: “给子智能体下达的明确指令。”,
+                    }
                 },
+                “required”: [“task_prompt”],
             },
- "required": []string{"task_prompt"},
-        },
-    }
-}
+        )
 
-type subagentArgs struct {
-    TaskPrompt string `json:"task_prompt"`
-}
+    def execute(self, args: Any) -> str:
+        # 解析参数
+        if not isinstance(args, dict):
+            raise ValueError(“参数解析失败: 参数必须是包含 task_prompt 的对象”)
+
+        task_prompt = args.get(“task_prompt”)
+        if not isinstance(task_prompt, str) or not task_prompt:
+            raise ValueError(“参数解析失败: task_prompt 必须是非空字符串”)
+
+        logging.info(
+            “[Subagent] 主 Agent 发起委派！正在拉起探路者: [%s]...”,
+            task_prompt,
+        )
+
+        # 【核心降维打击】：拉起一个完全物理隔离的子循环
+        # 我们把针对该任务的专项指令传给子智能体，并仅提供 read_only_registry。
+        # (子智能体只能读文件或执行只读的 bash，不能搞破坏)
+        try:
+            summary = self.runner.run_sub(
+                task_prompt, self.read_only_registry, self.reporter
+            )
+        except Exception as exc:
+            return f”子智能体执行失败: {exc}”
+
+        logging.info(“[Subagent] 子智能体任务结束。报告返回给主干...”)
+
+        # 最终，几万字的代码探索，化作了这一段轻量级的 Summary，
+        # 就像一次普通的 API 调用一样，返回给了始终保持清醒的主 Agent。
+        return f”【子智能体探索报告】:\n{summary}”
 ```
 
 ### 第 2 步：实现拉起与执行逻辑
 
 当主 Agent 发起 spawn_subagent 时，这个方法会被 Registry 触发。它会阻塞主线程，利用传入的 runner 接口，默默地在后台跑完一个完整的 ReAct 子循环。
-```
-// internal/tools/subagent.go (续)
 
-func (t *SubagentTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
- var input subagentArgs
- if err := json.Unmarshal(args, &input); err != nil {
- return "", fmt.Errorf("解析参数失败: %w", err)
-    }
+`execute` 方法已经在上面的代码中完整实现。它负责解析参数、调用 `self.runner.run_sub()` 拉起隔离的子循环，并将子智能体的总结报告返回给主 Agent。
 
-    log.Printf("[Subagent] 🚀 主 Agent 发起委派！正在拉起探路者: [%s]...\n", input.TaskPrompt)
+### 第 3 步：在 Engine 中实现 run_sub 接口支持
 
- // 【核心降维打击】：拉起一个完全物理隔离的子循环
- // 我们把针对该任务的专项指令传给子智能体，并仅提供 readOnlyRegistry。
- // (子智能体只能读文件或执行只读的 bash，不能搞破坏)
-    summary, err := t.runner.RunSub(ctx, input.TaskPrompt, t.readOnlyRegistry, t.reporter)
+为了满足 AgentRunner 协议，我们需要回到 internal/engine/loop.py，为主引擎增加一个轻量级的 run_sub 方法。它实际上就是去掉了 Session 管理的”一次性”变体。
 
- if err != nil {
- return fmt.Errorf("子智能体执行失败: %v", err).Error(), nil
-    }
+打开 internal/engine/loop.py，在 AgentEngine 类的末尾添加：
+```python
+# internal/engine/loop.py (续加在 AgentEngine 类末尾)
 
-    log.Printf("[Subagent] ✅ 子智能体任务结束。报告返回给主干...")
+    def run_sub(
+        self,
+        task_prompt: str,
+        read_only_registry: Registry,
+        reporter: Any = None,
+    ) -> str:
+        “””启动一次性、只读受限的子智能体探索循环。”””
 
- // 最终，几万字的代码探索，化作了这一段轻量级的 Summary，
- // 就像一次普通的 API 调用一样，返回给了始终保持清醒的主 Agent。
- return fmt.Sprintf("【子智能体探索报告】:\n%s", summary), nil
-}
-```
+        # 【核心优化】：子智能体极其容易偷懒。我们必须在 System Prompt 中严厉警告它必须使用工具！
+        context_history = [
+            Message(
+                role=Role.SYSTEM,
+                content=(
+                    “你是一个专门负责深度探索的探路者 (Explorer Subagent)。\n”
+                    “你的任务是根据主架构师的指令，在当前工作区内仔细阅读代码、查阅日志，搜集足够的信息。\n”
+                    “【核心纪律】\n”
+                    “1. 你必须、且只能依靠内置工具（如 bash 的 find/grep，或 read_file）去寻找答案。绝对不允许凭空捏造或猜测！\n”
+                    “2. 如果你没有找到确切的答案，你必须继续使用工具深入搜索。\n”
+                    “3. 当且仅当你找到了确切的线索后，停止调用工具，直接输出一段纯文本作为你的终极汇报。”
+                    “主架构师会根据你的汇报来做下一步决策。”
+                ),
+            ),
+            Message(role=Role.USER, content=task_prompt),
+        ]
 
-### 第 3 步：在 Engine 中实现 RunSub 接口支持
+        # 限制子智能体最多只能跑 10 个 Turn，防止它自己卡死
+        max_sub_turns = 10
+        turn_count = 0
 
-为了满足 AgentRunner 接口，我们需要回到 internal/engine/loop.go，为主引擎增加一个轻量级的 RunSub 方法。它实际上就是去掉了 Session 管理的“一次性”变体。
+        while True:
+            turn_count += 1
+            if turn_count > max_sub_turns:
+                raise RuntimeError(
+                    f”子智能体探索过于深入，超过 {max_sub_turns} 轮被强制召回，请主 Agent 给它更明确的指令”
+                )
 
-打开 internal/engine/loop.go：
-```
-// internal/engine/loop.go (续加在末尾)
+            # 【驾驭底线】：子智能体仅能获取传入的只读工具注册表
+            available_tools = read_only_registry.get_available_tools()
 
-// RunSub 是专为 Subagent 拉起的一次性受限循环。
-// 它不依赖外部 Session，打完就跑。
-// Reporter：为了让用户在终端看到子智能体的工作轨迹，我们将主线程的 Reporter 透传进来，并打上特殊标记。
-func (e *AgentEngine) RunSub(ctx context.Context, taskPrompt string, readOnlyRegistry tools.Registry, reporter any) (string, error) {
+            compacted_context = self.compactor.compact(context_history)
 
- // 【核心优化】：子智能体极其容易偷懒。我们必须在 System Prompt 中严厉警告它必须使用工具！
-    contextHistory := []schema.Message{
-        {
-            Role: schema.RoleSystem,
-            Content: `你是一个专门负责深度探索的探路者 (Explorer Subagent)。
-你的任务是根据主架构师的指令，在当前工作区内仔细阅读代码、查阅日志，搜集足够的信息。
+            # 子任务要求急速响应，强制关闭主体的慢思考，直接预测行动
+            try:
+                action_resp = self.provider.generate(compacted_context, available_tools)
+            except Exception as exc:
+                raise RuntimeError(f”子智能体推理失败: {exc}”) from exc
 
-【核心纪律】
-1. 你必须、且只能依靠内置工具（如 bash 的 find/grep，或 read_file）去寻找答案。绝对不允许凭空捏造或猜测！
-2. 如果你没有找到确切的答案，你必须继续使用工具深入搜索。
-3. 当且仅当你找到了确切的线索后，停止调用工具，直接输出一段纯文本作为你的终极汇报。主架构师会根据你的汇报来做下一步决策。`,
-        },
-        {
-            Role:    schema.RoleUser,
-            Content: taskPrompt,
-        },
-    }
+            context_history.append(action_resp)
 
- // 限制子智能体最多只能跑 10 个 Turn，防止它自己卡死
- const maxSubTurns = 10
-    turnCount := 0
+            # 【核心退出条件】：子智能体一旦不调用工具了，说明它做好了总结汇报
+            if not action_resp.tool_calls:
+                # 直接将它的这段汇报内容剥离出来返回给上层
+                return action_resp.content
 
- for {
-        turnCount++
- if turnCount > maxSubTurns {
- return "", fmt.Errorf("子智能体探索过于深入，超过 %d 轮被强制召回，请主 Agent 给它更明确的指令", maxSubTurns)
-        }
+            # 执行只读工具的并发循环
+            logging.info(
+                “[Engine][Subagent] 模型请求并发调用 %d 个只读工具...”,
+                len(action_resp.tool_calls),
+            )
+            observation_msgs: List[Optional[Message]] = [None] * len(action_resp.tool_calls)
 
- // 【驾驭底线】：子智能体仅能获取传入的只读工具注册表
-        availableTools := readOnlyRegistry.GetAvailableTools()
+            def execute_tool(idx: int, call) -> None:
+                # 【可视化的关键】：让终端用户看到 Subagent 正在干嘛
+                if reporter is not None:
+                    reporter.on_tool_call(f”[Subagent] {call.name}”, call.arguments)
 
-        compactedContext := e.compactor.Compact(contextHistory)
+                result = read_only_registry.execute(call)
 
- // 子任务要求急速响应，强制关闭主体的慢思考，直接预测行动
-        actionResp, err := e.provider.Generate(ctx, compactedContext, availableTools)
- if err != nil {
- return "", fmt.Errorf("子智能体推理失败: %w", err)
-        }
+                final_output = result.output
+                if result.is_error:
+                    final_output = self.recovery_manager.analyze_and_inject(
+                        call.name, result.output
+                    )
 
-        contextHistory = append(contextHistory, *actionResp)
+                if reporter is not None:
+                    display = final_output
+                    if len(display) > 200:
+                        display = display[:200] + “... (已截断)”
 
- // 【核心退出条件】：子智能体一旦不调用工具了，说明它做好了总结汇报
- if len(actionResp.ToolCalls) == 0 {
- // 直接将它的这段汇报内容剥离出来返回给上层
- return actionResp.Content, nil
-        }
+                    reporter.on_tool_result(
+                        f”[Subagent] {call.name}”, display, result.is_error
+                    )
 
- // 执行只读工具的并发循环
-        observationMsgs := make([]schema.Message, len(actionResp.ToolCalls))
- var wg sync.WaitGroup
+                observation_msgs[idx] = Message(
+                    role=Role.USER,
+                    content=final_output,
+                    tool_call_id=call.id,
+                )
 
- for i, toolCall := range actionResp.ToolCalls {
-            wg.Add(1)
- go func(idx int, call schema.ToolCall) {
- defer wg.Done()
+            with ThreadPoolExecutor(max_workers=len(action_resp.tool_calls)) as executor:
+                futures = [
+                    executor.submit(execute_tool, idx, tool_call)
+                    for idx, tool_call in enumerate(action_resp.tool_calls)
+                ]
+                for future in futures:
+                    future.result()
 
- // 【可视化的关键】：让终端用户看到 Subagent 正在干嘛
- var r Reporter
- if reporter != nil {
-                    r = reporter.(Reporter)
-                    r.OnToolCall(ctx, fmt.Sprintf("[Subagent] %s", call.Name), string(call.Arguments))
-                }
-
-                result := readOnlyRegistry.Execute(ctx, call)
-
-                finalOutput := result.Output
- if result.IsError {
-                    finalOutput = e.recovery.AnalyzeAndInject(call.Name, result.Output)
-                }
-
- if reporter != nil {
-                    display := finalOutput
- if len(display) > 200 {
-                        display = display[:200] + "... (已截断)"
-                    }
-                    r.OnToolResult(ctx, fmt.Sprintf("[Subagent] %s", call.Name), display, result.IsError)
-                }
-
-                observationMsgs[idx] = schema.Message{
-                    Role:       schema.RoleUser,
-                    Content:    finalOutput,
-                    ToolCallID: call.ID,
-                }
-            }(i, toolCall)
-        }
-
-        wg.Wait()
-        contextHistory = append(contextHistory, observationMsgs...)
-    }
-}
+            for obs in observation_msgs:
+                if obs is not None:
+                    context_history.append(obs)
 ```
 
 ## 运行与实战测试：见证“包工头”的诞生
@@ -286,89 +292,92 @@ echo "这是一个空文件" > workspace/fake1.go
 echo "这也是一个空文件" > workspace/fake2.go
 ```
 
-打开 cmd/claw/main.go，我们将 subagent 工具挂载给主引擎。
+打开 cmd/claw/main_subagent.py，我们将 subagent 工具挂载给主引擎。
 
-注意挂载时的特殊技巧：我们要为主引擎准备“全功能兵器库”，为子引擎准备“只读冷兵器库”。
-```
-// cmd/claw/main.go
-package main
+注意挂载时的特殊技巧：我们要为主引擎准备”全功能兵器库”，为子引擎准备”只读冷兵器库”。
+```python
+# cmd/claw/main_subagent.py
+import logging
 
-import (
- "context"
- "log"
- "os"
-
-    ctxpkg "github.com/yourname/go-tiny-claw/internal/context"
- "github.com/yourname/go-tiny-claw/internal/engine"
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/schema"
- "github.com/yourname/go-tiny-claw/internal/tools"
+from common import (
+    build_engine_for_work_dir,
+    configure_logging,
+    new_bash_tool,
+    new_edit_file_tool,
+    new_read_file_tool,
+    new_write_file_tool,
+    require_env_vars,
+    resolve_work_dir,
 )
+from internal.engine.terminal_reporter import new_terminal_reporter
+from internal.tools.readfile import new_read_file_tool as new_read_only_file_tool
+from internal.tools.registry import new_registry
+from internal.tools.subagent import new_subagent_tool
+from internal.tools.Bash import new_bash_tool as new_read_only_bash_tool
 
-func main() {
- if os.Getenv("ZHIPU_API_KEY") == "" {
-        log.Fatal("请先导出 ZHIPU_API_KEY 环境变量")
-    }
 
-    workDir, _ := os.Getwd()
-    workDir += "/workspace"
+def main() -> None:
+    configure_logging()
+    require_env_vars((“ZHIPU_API_KEY”,))
 
-    llmProvider := provider.NewZhipuOpenAIProvider("glm-4.5-air") // Claude 3.5 更佳
-    reporter := engine.NewTerminalReporter()
+    work_dir = resolve_work_dir()
+    reporter = new_terminal_reporter()
 
- // 【防御沙箱】为子智能体准备受限的只读注册表
-    readOnlyRegistry := tools.NewRegistry()
-    readOnlyRegistry.Register(tools.NewReadFileTool(workDir))
-    readOnlyRegistry.Register(tools.NewBashTool(workDir)) // 允许简单的 grep 等搜索操作
+    # 【防御沙箱】为子智能体准备受限的只读注册表
+    read_only_registry = new_registry()
+    read_only_registry.register(new_read_only_file_tool(work_dir))
+    read_only_registry.register(new_read_only_bash_tool(work_dir))  # 允许简单的 grep 等搜索操作
 
- // 为主智能体准备全功能注册表
-    mainRegistry := tools.NewRegistry()
-    mainRegistry.Register(tools.NewReadFileTool(workDir))
-    mainRegistry.Register(tools.NewWriteFileTool(workDir))
-    mainRegistry.Register(tools.NewBashTool(workDir))
-    mainRegistry.Register(tools.NewEditFileTool(workDir))
+    # 为主智能体准备全功能注册表
+    engine = build_engine_for_work_dir(
+        work_dir=work_dir,
+        tool_factories=[
+            new_read_file_tool,
+            new_write_file_tool,
+            new_bash_tool,
+            new_edit_file_tool,
+        ],
+        enable_thinking=False,
+    )
 
- // 初始化主引擎
-    eng := engine.NewAgentEngine(llmProvider, mainRegistry, false, false)
+    # 【核心装配】：将带有 Engine 引用和只读 Registry 的 Subagent 工具注册进主线
+    engine.registry.register(new_subagent_tool(engine, read_only_registry, reporter))
 
- // 【核心装配】：将带有 Engine 引用和只读 Registry 的 Subagent 工具注册进主线
-    mainRegistry.Register(tools.NewSubagentTool(eng, readOnlyRegistry, reporter))
+    from common import new_cli_session
+    session = new_cli_session()
 
-    sessionID := "test_subagent_001"
-    sess := ctxpkg.GlobalSessionMgr.GetOrCreate(sessionID, workDir)
+    prompt = “””
+我需要你在这个遗留项目里，找到那个”核心密码”。
+为了防止污染主上下文，请你务必派出子智能体（spawn_subagent）去执行探索任务。
+你可以让子智能体使用 bash 去查找当前目录（及其所有子目录）下名为 config.txt 的文件。
+子智能体拿到密码向你汇报后，请你亲自使用 write_file 工具，将密码写在根目录的 answer.txt 里。
+“””
 
-    prompt := `
-    我需要你在这个遗留项目里，找到那个“核心密码”。
-    为了防止污染主上下文，请你务必派出子智能体（spawn_subagent）去执行探索任务。
-    你可以让子智能体使用 bash 去查找当前目录（及其所有子目录）下名为 config.txt 的文件。
-    子智能体拿到密码向你汇报后，请你亲自使用 write_file 工具，将密码写在根目录的 answer.txt 里。
-    `
+    logging.info(“>>> 启动多智能体协同测试...”)
+    err = engine.run(prompt, session=session, reporter=reporter)
+    if err is not None:
+        logging.error(“引擎运行崩溃: %s”, err)
+        raise SystemExit(1) from err
 
-    log.Println("\n>>> 🚀 启动多智能体协同测试...")
-    sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
 
-    err := eng.Run(context.Background(), sess, reporter)
- if err != nil {
-        log.Fatalf("引擎运行崩溃: %v", err)
-    }
-}
+if __name__ == “__main__”:
+    main()
 ```
 
 ### 奇迹时刻：主从协同的艺术
 
 运行程序。你会见证一个极其清晰的“包工头分配任务 -> 探路者踩坑 -> 探路者汇报 -> 包工头收尾”的全过程：
 ```
-$go run cmd/claw/main.go 
-2026/04/25 21:43:25 [Registry] 成功挂载工具: read_file
-2026/04/25 21:43:25 [Registry] 成功挂载工具: bash
-2026/04/25 21:43:25 [Registry] 成功挂载工具: read_file
-2026/04/25 21:43:25 [Registry] 成功挂载工具: write_file
-2026/04/25 21:43:25 [Registry] 成功挂载工具: bash
-2026/04/25 21:43:25 [Registry] 成功挂载工具: edit_file
-2026/04/25 21:43:25 [Registry] 成功挂载工具: spawn_subagent
-2026/04/25 21:43:25 
->>> 🚀 启动多智能体协同测试...
-2026/04/25 21:43:25 [Engine] 唤醒会话 [test_subagent_001]，锁定工作区: build-agent-harness-from-scratch/part4/source/ch17/go-tiny-claw/workspace (PlanMode: false)
+$ python cmd/claw/main_subagent.py
+2026/04/25 21:43:25 [INFO] [Registry] 成功挂载工具: read_file
+2026/04/25 21:43:25 [INFO] [Registry] 成功挂载工具: bash
+2026/04/25 21:43:25 [INFO] [Registry] 成功挂载工具: read_file
+2026/04/25 21:43:25 [INFO] [Registry] 成功挂载工具: write_file
+2026/04/25 21:43:25 [INFO] [Registry] 成功挂载工具: bash
+2026/04/25 21:43:25 [INFO] [Registry] 成功挂载工具: edit_file
+2026/04/25 21:43:25 [INFO] [Registry] 成功挂载工具: spawn_subagent
+2026/04/25 21:43:25 [INFO] >>> 启动多智能体协同测试...
+2026/04/25 21:43:25 [INFO] [Engine] 引擎启动， 会话：test_subagent_001 锁定工作区: .../workspace
 
 🤖 Agent 回复:
 
@@ -377,7 +386,7 @@ $go run cmd/claw/main.go
 
 [🛠️ 调用工具] spawn_subagent
    参数: {"task_prompt":"请在这个项目中探索并找到核心密码。具体任务如下：\n1. 使用 bash 命令查找当前目录及其所有子目录... (已截断)
-2026/04/25 21:43:30 [Subagent] 🚀 主 Agent 发起委派！正在拉起探路者: [请在这个项目中探索并找到核心密码。具体任务如下：
+2026/04/25 21:43:30 [INFO] [Subagent] 主 Agent 发起委派！正在拉起探路者: [请在这个项目中探索并找到核心密码。具体任务如下：
 1. 使用 bash 命令查找当前目录及其所有子目录下名为 config.txt 的文件
 2. 读取所有找到的 config.txt 文件内容
 3. 寻找包含"核心密码"、"password"、"secret"、"key"等关键词的内容
@@ -389,7 +398,7 @@ $go run cmd/claw/main.go
 [🛠️ 调用工具] [Subagent] read_file
    参数: {"path":"./legacy/v1/auth/config.txt"}
 [✅ 执行成功] [Subagent] read_file
-2026/04/25 21:43:42 [Subagent] ✅ 子智能体任务结束。报告返回给主干...
+2026/04/25 21:43:42 [INFO] [Subagent] 子智能体任务结束。报告返回给主干...
 [✅ 执行成功] spawn_subagent
 
 🤖 Agent 回复:
@@ -427,7 +436,7 @@ $go run cmd/claw/main.go
 
 然而，在 AI 架构的前沿领域（如已随 Claude Opus 4.6 一同发布、目前仍处于实验阶段的 Claude Code Agent Teams 模式），多智能体协作已经演化出了极其复杂的社会化形态。
 
-如果你希望在 go-tiny-claw 的基础上继续深钻，以下三个前沿方向将是你的挑战：
+如果你希望在 tiny-claw 的基础上继续深钻，以下三个前沿方向将是你的挑战：
 
 黑板架构（Blackboard Architecture）与共享任务列表
 
@@ -441,7 +450,7 @@ $go run cmd/claw/main.go
 
 在某些极度敏感的场景（如线上核心代码 Review），Harness 引擎会同时拉起 3 个不同大模型（比如 Claude Sonnet、GPT-5.x、Gemini 系列）驱动的 Reviewer Subagent。这三个子智能体会先分别输出 Review 意见，然后互相审查对方的意见，直到达成多数票共识，才会将最终报告反馈给人类。这极大地消除了单一模型的幻觉。
 
-从单兵作战到多进程协同，Agent 架构越来越像 Kubernetes 这样的分布式容器编排系统。我们的 go-tiny-claw 已经为你打下了坚实的通信和内存隔离底座，后续分布式多智能体编排，就看你的想象力了。
+从单兵作战到多进程协同，Agent 架构越来越像 Kubernetes 这样的分布式容器编排系统。我们的 tiny-claw 已经为你打下了坚实的通信和内存隔离底座，后续分布式多智能体编排，就看你的想象力了。
 
 ## 本讲小结
 
@@ -453,7 +462,7 @@ $go run cmd/claw/main.go
 
 极简的多智能体哲学：我们没有去设计复杂的图谱和信道让多个 Agent 互相“开会聊天”。在极简哲学里，子智能体就是主智能体的一个普通函数。主调，子做，子总结，主继续。这就是大道至简。
 
-至此，我们的 go-tiny-claw 在“功能构建（Building）”上的所有设计蓝图，已经全部落地生根。它的内核强大，工具丰富，防御森严。但是，作为一个走向真实商业与开源生态的系统工程，“能跑”只是及格线。
+至此，我们的 tiny-claw 在”功能构建（Building）”上的所有设计蓝图，已经全部落地生根。它的内核强大，工具丰富，防御森严。但是，作为一个走向真实商业与开源生态的系统工程，“能跑”只是及格线。
 
 你怎么向老板或开源社区证明，你的 Harness 引擎真的好用？当你调整了 Compactor 的阈值，或者修改了一句提示词，你如何知道整个系统的“智商”是升了还是降了？甚至，当任务在半夜崩溃时，你怎么追踪那个不可见的黑盒到底在哪一步犯了致命错误？
 
@@ -463,7 +472,7 @@ $go run cmd/claw/main.go
 
 ## 思考题
 
-在当前的 SubagentTool 实现中，我们的主 Agent 使用的是阻塞式委派（Synchronous Delegation）。也就是说，当它发起 spawn_subagent 时，主线程会一直在那里死等（t.runner.RunSub(...)），直到子智能体把所有脏活干完。
+在当前的 SubagentTool 实现中，我们的主 Agent 使用的是阻塞式委派（Synchronous Delegation）。也就是说，当它发起 spawn_subagent 时，主线程会一直在那里死等（`self.runner.run_sub(...)`），直到子智能体把所有脏活干完。
 
 但在极其复杂的场景下（比如，你想让子智能体去看几百个不同微服务的日志），你可能希望主 Agent 能够“并行委派”：同时拉起 3 个探索小队去不同目录搜查，主 Agent 趁这个时间去干别的事（比如去把已有的代码做个小重构），等 3 个小队的回报都集齐了再做最终汇总。
 
