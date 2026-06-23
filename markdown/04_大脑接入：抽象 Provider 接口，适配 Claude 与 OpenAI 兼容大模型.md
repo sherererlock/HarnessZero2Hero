@@ -8,7 +8,7 @@
 
 如果在我们的核心 Main Loop 中直接写入这些特定厂商的 SDK 代码，整个驾驭工程（Harness Engineering）的解耦原则就会被彻底破坏。
 
-本讲，我们将通过设计优雅的 Provider 抽象层，完美隔离这种差异。为了兼顾国内网络环境的便利性，我们将使用国内的智谱大模型（GLM）来作为统一的算力底座。由于智谱 API 实现了对 OpenAI 和 Claude 两大生态双协议的兼容，我们将在同一套代码中，演示如何通过官方的 OpenAI Go SDK 和 Anthropic Go SDK，双管齐下地接入 glm-4.5-air 模型。
+本讲，我们将通过设计优雅的 Provider 抽象层，完美隔离这种差异。为了兼顾国内网络环境的便利性，我们将使用国内的智谱大模型（GLM）来作为统一的算力底座。由于智谱 API 实现了对 OpenAI 和 Claude 两大生态双协议的兼容，我们将在同一套代码中，演示如何通过官方的 OpenAI Python SDK 和 Anthropic Python SDK，双管齐下地接入 glm-4.5-air 模型。
 
 ## Provider 作为“同声传译”
 
@@ -17,15 +17,16 @@
 Claude 的 API 使用的是 messages 数组，工具调用返回的是特定的 tool_use 块；而 OpenAI 兼容 API 使用的是一套不同的 tools 和 tool_calls 结构。
 
 如果 Main Loop 需要关心这些底层细节，它的逻辑就会变成这样：
-```
-// 糟糕的面条代码示例 (千万别这么写)
-if engine.ModelType == "claude" {
- // 构造 anthropic.MessageParam
- // 解析 anthropic.ToolUseBlock
-} else if engine.ModelType == "openai" {
- // 构造 openai.ChatCompletionMessage
- // 解析 openai.ToolCall
-}
+```python
+# 糟糕的面条代码示例 (千万别这么写)
+if engine.model_type == "claude":
+    # 构造 anthropic.MessageParam
+    # 解析 anthropic.ToolUseBlock
+    pass
+elif engine.model_type == "openai":
+    # 构造 openai.ChatCompletionMessage
+    # 解析 openai.ToolCall
+    pass
 ```
 
 这违背了我们驾驭工程的极简和解耦哲学。Main Loop 的唯一职责是维护上下文时间线（Context History）。它不应该知道外部世界是用什么协议通信的。
@@ -44,358 +45,503 @@ Provider 层的核心职责，就是充当一个同声传译员（Translator）�
 
 ## 代码实战：实现双协议 Provider 适配器
 
-在开始编写代码前，我们需要拉取两大官方的 Go SDK。
+在开始编写代码前，我们需要安装两大官方的 Python SDK。
 
-注：我们将使用最新的 OpenAI Go SDK V3 官方包，它在类型安全上做了大量重构。
-```
-go get github.com/openai/openai-go/v3
-go get github.com/anthropics/anthropic-sdk-go
+注：我们将使用官方的 OpenAI Python SDK 和 Anthropic Python SDK。
+```bash
+pip install openai anthropic
 ```
 
 ### 目录结构回顾与更新
 
-我们将所有的翻译逻辑都集中在 internal/provider 目录下。为了进行测试，我们仍会在 main.go 中保留一个 Mock 的 Tool Registry（真正的 Tools Registry 将在下一讲实现）。
+我们将所有的翻译逻辑都集中在 internal/provider 目录下。为了进行测试，我们仍会在 main.py 中保留一个 Mock 的 Tool Registry（真正的 Tools Registry 将在下一讲实现）。
 ```
-go-tiny-claw/
+tiny-claw/
 ├── cmd/
 │   └── claw/
-│       └── main.go          # 【修改】接入真实的 Provider 并启动测试
+│       └── main.py          # 【修改】接入真实的 Provider 并启动测试
 ├── internal/
-│   ├── engine/              # 保持不变 (loop.go 中已支持两阶段思考)
+│   ├── engine/              # 保持不变 (loop.py 中已支持两阶段思考)
 │   ├── provider/            # 【模型适配层】
-│   │   ├── interface.go     # 接口定义 (复用)
-│   │   ├── openai.go        # 【新增】基于 OpenAI V3 SDK 的适配器
-│   │   └── claude.go        # 【新增】基于 Anthropic SDK 的适配器
+│   │   ├── interface.py     # 接口定义 (复用)
+│   │   ├── openai.py        # 【新增】基于 OpenAI Python SDK 的适配器
+│   │   └── claude.py        # 【新增】基于 Anthropic Python SDK 的适配器
 │   ├── schema/              # 保持不变
 │   └── tools/               # 保持不变
-├── go.mod
-└── go.sum
+├── requirements.txt
+└── setup.py
 ```
 
 ### 第 1 步：复习接口契约
 
 为了保持代码的连贯性，我们快速回顾一下在之前章节定义的 LLMProvider 接口：
-```
-// internal/provider/interface.go
-package provider
+```python
+# internal/provider/interface.py
+from abc import ABC, abstractmethod
+from typing import List
+from ..schema.message import Message, ToolDefinition
 
-import (
- "context"
- "github.com/yourname/go-tiny-claw/internal/schema"
-)
+class LLMProvider(ABC):
+    """LLMProvider 定义了与大模型通信的统一契约"""
 
-type LLMProvider interface {
- // Generate 接收当前的上下文历史和可用工具列表，返回模型的新消息。
- // 注意：当 availableTools 为 nil 或长度为 0 时，代表引擎正在强制模型进入慢思考阶段。
-    Generate(ctx context.Context, messages []schema.Message, availableTools []schema.ToolDefinition) (*schema.Message, error)
-}
+    @abstractmethod
+    def generate(
+        self,
+        messages: List[Message],
+        available_tools: List[ToolDefinition]
+    ) -> Message:
+        """Generate 接收当前的上下文历史和可用工具列表，返回模型的新消息。
+        
+        注意：当 available_tools 为 None 或长度为 0 时，代表引擎正在强制模型进入慢思考阶段。
+        """
+        pass
 ```
 
 ### 第 2 步：实现 OpenAI 格式适配器（兼容智谱）
 
-我们首先编写 openai.go。智谱 API 原生兼容 OpenAI 协议，所以我们只需在使用官方最新的 openai-go/v3 SDK 时，将其 BaseURL 替换为智谱的 API 地址即可。
+我们首先编写 openai.py。智谱 API 原生兼容 OpenAI 协议，所以我们只需在使用官方 OpenAI Python SDK 时，将其 base_url 替换为智谱的 API 地址即可。
 
-新建 internal/provider/openai.go：
-```
-// internal/provider/openai.go
-package provider
+新建 internal/provider/openai.py：
+```python
+# internal/provider/openai.py
+import json
+import os
+from typing import Any, List, Optional
 
-import (
- "context"
- "encoding/json"
- "fmt"
- "os"
+from ..schema.message import Message, Role, ToolCall, ToolDefinition
+from .interface import LLMProvider
 
- "github.com/openai/openai-go/v3"
- "github.com/openai/openai-go/v3/option"
- "github.com/openai/openai-go/v3/shared"
- "github.com/yourname/go-tiny-claw/internal/schema"
-)
+ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
 
-type OpenAIProvider struct {
-    client openai.Client // 值类型，非指针
-    model  string
-}
 
-// NewZhipuOpenAIProvider 构造函数：基于 OpenAI V3 SDK，指向智谱底座
-func NewZhipuOpenAIProvider(model string) *OpenAIProvider {
-    apiKey := os.Getenv("ZHIPU_API_KEY")
- if apiKey == "" {
- panic("请设置 ZHIPU_API_KEY 环境变量")
-    }
- // 核心：将官方 SDK 的地址替换为智谱的兼容端点
-    baseURL := "https://open.bigmodel.cn/api/paas/v4/"
+def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
 
- return &OpenAIProvider{
-        client: openai.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
-        model:  model,
-    }
-}
 
-func (p *OpenAIProvider) Generate(ctx context.Context, msgs []schema.Message, availableTools []schema.ToolDefinition) (*schema.Message, error) {
- var openaiMsgs []openai.ChatCompletionMessageParamUnion
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
- // 1. 翻译上下文消息
- for _, msg := range msgs {
- switch msg.Role {
- case schema.RoleSystem:
-            openaiMsgs = append(openaiMsgs, openai.SystemMessage(msg.Content))
 
- case schema.RoleUser:
- if msg.ToolCallID != "" {
- // 注意：v3 新版参数顺序是 (content, toolCallID)
-                openaiMsgs = append(openaiMsgs, openai.ToolMessage(msg.Content, msg.ToolCallID))
-            } else {
-                openaiMsgs = append(openaiMsgs, openai.UserMessage(msg.Content))
-            }
+class OpenAIProvider(LLMProvider):
+    """使用 OpenAI Python SDK 访问智谱兼容接口的 Provider。"""
 
- case schema.RoleAssistant:
-            astParam := openai.ChatCompletionAssistantMessageParam{}
+    def __init__(
+        self,
+        model: str,
+        client: Any = None,
+        api_key: Optional[str] = None,
+        base_url: str = ZHIPU_BASE_URL,
+    ):
+        self.model = model
+        self.base_url = base_url
+        self.client = client or self._build_client(api_key=api_key, base_url=base_url)
 
- if msg.Content != "" {
-                astParam.Content = openai.ChatCompletionAssistantMessageParamContentUnion{
-                    OfString: openai.String(msg.Content),
-                }
-            }
+    @staticmethod
+    def _build_client(api_key: Optional[str], base_url: str) -> Any:
+        """构造函数：基于 OpenAI Python SDK，指向智谱底座"""
+        api_key = api_key or os.getenv("ZHIPU_API_KEY")
+        if not api_key:
+            raise ValueError("请设置 ZHIPU_API_KEY 环境变量")
 
- // 【重要】如果历史包含 ToolCalls，必须原样放回，以维系大模型的逻辑链
- if len(msg.ToolCalls) > 0 {
- var toolCalls []openai.ChatCompletionMessageToolCallUnionParam
- for _, tc := range msg.ToolCalls {
- // OfFunction 对应 GetFunction()，字段类型严格要求为指针
-                    toolCalls = append(toolCalls, openai.ChatCompletionMessageToolCallUnionParam{
-                        OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
-                            ID:   tc.ID,
-                            Type: "function",
-                            Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
-                                Name:      tc.Name,
-                                Arguments: string(tc.Arguments),
-                            },
-                        },
-                    })
-                }
-                astParam.ToolCalls = toolCalls
-            }
+        try:
+            from openai import OpenAI
+        except ImportError as exc:
+            raise ImportError("请先安装 openai 包，例如: pip install openai") from exc
 
-            openaiMsgs = append(openaiMsgs, openai.ChatCompletionMessageParamUnion{
-                OfAssistant: &astParam,
-            })
-        }
-    }
+        # 核心：将官方 SDK 的地址替换为智谱的兼容端点
+        return OpenAI(api_key=api_key, base_url=base_url)
 
- // 2. 翻译工具定义 (v3 新 API 特性适配)
- var openaiTools []openai.ChatCompletionToolUnionParam
- for _, toolDef := range availableTools {
- var params shared.FunctionParameters
-
- // 尝试直接断言，如果不成功则通过 JSON 往返序列化来保证类型匹配
- if m, ok := toolDef.InputSchema.(map[string]interface{}); ok {
-            params = shared.FunctionParameters(m)
-        } else {
- // fallback：JSON 往返序列化
-            b, _ := json.Marshal(toolDef.InputSchema)
-            _ = json.Unmarshal(b, &params)
+    def generate(
+        self,
+        messages: List[Message],
+        available_tools: Optional[List[ToolDefinition]],
+    ) -> Message:
+        request_messages = [self._message_to_openai(message) for message in messages]
+        params = {
+            "model": self.model,
+            "messages": request_messages,
         }
 
-        openaiTools = append(openaiTools, openai.ChatCompletionFunctionTool(
-            shared.FunctionDefinitionParam{
-                Name:        toolDef.Name,
-                Description: openai.String(toolDef.Description),
-                Parameters:  params,
+        # 翻译工具定义
+        openai_tools = self._tools_to_openai(available_tools)
+
+        # 【慢思考机制支撑】仅当 available_tools 存在时才挂载 Tools
+        if openai_tools:
+            params["tools"] = openai_tools
+
+        try:
+            response = self.client.chat.completions.create(**params)
+        except Exception as exc:
+            raise RuntimeError(f"OpenAI/Zhipu API 请求失败: {exc}") from exc
+
+        choices = _get_attr(response, "choices", [])
+        if not choices:
+            raise RuntimeError("API 返回了空的 Choices")
+
+        # 将 API Response 反向翻译为内部 Message
+        result_message = self._message_from_openai(_get_attr(choices[0], "message"))
+        return result_message
+
+    def _message_to_openai(self, message: Message) -> dict[str, Any]:
+        """翻译上下文消息"""
+        if message.role == Role.SYSTEM:
+            return {"role": "system", "content": message.content}
+
+        if message.role == Role.USER:
+            if message.tool_call_id:
+                # 注意：Tool 消息的参数顺序是 (content, tool_call_id)
+                return {
+                    "role": "tool",
+                    "content": message.content,
+                    "tool_call_id": message.tool_call_id,
+                }
+            return {"role": "user", "content": message.content}
+
+        if message.role == Role.ASSISTANT:
+            payload: dict[str, Any] = {"role": "assistant"}
+            if message.content:
+                payload["content"] = message.content
+
+            # 【重要】如果历史包含 ToolCalls，必须原样放回，以维系大模型的逻辑链
+            if message.tool_calls:
+                payload["tool_calls"] = [
+                    self._tool_call_to_openai(tc) for tc in message.tool_calls
+                ]
+
+            if "content" not in payload and "tool_calls" not in payload:
+                payload["content"] = ""
+            return payload
+
+        raise ValueError(f"不支持的消息角色: {message.role}")
+
+    def _tool_call_to_openai(self, tool_call: ToolCall) -> dict[str, Any]:
+        return {
+            "id": tool_call.id,
+            "type": "function",
+            "function": {
+                "name": tool_call.name,
+                "arguments": self._encode_tool_arguments(tool_call.arguments),
             },
-        ))
-    }
-
- // 3. 构建请求并发送
-    params := openai.ChatCompletionNewParams{
-        Model:    p.model,
-        Messages: openaiMsgs,
-    }
-
- // 【慢思考机制支撑】仅当 availableTools 存在时才挂载 Tools
- if len(openaiTools) > 0 {
-        params.Tools = openaiTools
-    }
-
-    resp, err := p.client.Chat.Completions.New(ctx, params)
- if err != nil {
- return nil, fmt.Errorf("OpenAI/Zhipu API 请求失败: %w", err)
-    }
- if len(resp.Choices) == 0 {
- return nil, fmt.Errorf("API 返回了空的 Choices")
-    }
-
- // 4. 将 API Response 反向翻译为内部 schema.Message
-    choice := resp.Choices[0].Message
-    resultMsg := &schema.Message{
-        Role:    schema.RoleAssistant,
-        Content: choice.Content,
-    }
-
- for _, tc := range choice.ToolCalls {
- if tc.Type == "function" {
-            resultMsg.ToolCalls = append(resultMsg.ToolCalls, schema.ToolCall{
-                ID:        tc.ID,
-                Name:      tc.Function.Name,
-                Arguments: []byte(tc.Function.Arguments), // 提取 JSON 字符串字节
-            })
         }
-    }
 
- return resultMsg, nil
-}
+    def _tools_to_openai(
+        self, available_tools: Optional[List[ToolDefinition]]
+    ) -> List[dict[str, Any]]:
+        """翻译工具定义 (适配 OpenAI 格式)"""
+        openai_tools: List[dict[str, Any]] = []
+        for tool in available_tools or []:
+            # 尝试直接使用，如果不匹配则通过 JSON 往返序列化来保证类型匹配
+            params = self._normalize_input_schema(tool.input_schema)
+            openai_tools.append(
+                {
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": params,
+                    },
+                }
+            )
+        return openai_tools
+
+    def _normalize_input_schema(self, input_schema: Any) -> dict[str, Any]:
+        """JSON 往返序列化，保证类型匹配"""
+        if input_schema is None:
+            return {"type": "object", "properties": {}}
+        if isinstance(input_schema, dict):
+            return input_schema
+        try:
+            normalized = json.loads(_json_dumps(input_schema))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"工具入参 Schema 不是合法 JSON 对象: {input_schema!r}") from exc
+        if not isinstance(normalized, dict):
+            raise ValueError(f"工具入参 Schema 必须是字典对象: {input_schema!r}")
+        return normalized
+
+    def _message_from_openai(self, message: Any) -> Message:
+        """将 API Response 反向翻译为内部 Message"""
+        if message is None:
+            raise RuntimeError("API 返回的消息为空")
+
+        content = _get_attr(message, "content", "") or ""
+        tool_calls: List[ToolCall] = []
+        for tool_call in _get_attr(message, "tool_calls", []) or []:
+            if _get_attr(tool_call, "type") != "function":
+                continue
+            function = _get_attr(tool_call, "function")
+            tool_calls.append(
+                ToolCall(
+                    id=_get_attr(tool_call, "id", ""),
+                    name=_get_attr(function, "name", ""),
+                    arguments=self._decode_tool_arguments(
+                        _get_attr(function, "arguments", "")
+                    ),
+                )
+            )
+
+        return Message(
+            role=Role.ASSISTANT,
+            content=content,
+            tool_calls=tool_calls or None,
+        )
+
+    def _encode_tool_arguments(self, arguments: Any) -> str:
+        if arguments is None:
+            return "{}"
+        if isinstance(arguments, bytes):
+            return arguments.decode("utf-8")
+        if isinstance(arguments, str):
+            return arguments
+        return _json_dumps(arguments)
+
+    def _decode_tool_arguments(self, arguments: Any) -> Any:
+        if arguments in (None, ""):
+            return {}
+        if isinstance(arguments, bytes):
+            arguments = arguments.decode("utf-8")
+        if not isinstance(arguments, str):
+            return arguments
+        try:
+            return json.loads(arguments)
+        except json.JSONDecodeError:
+            return arguments
+
+
+# 构造函数别名，指向智谱底座
+def new_zhipu_openai_provider(model: str) -> OpenAIProvider:
+    return OpenAIProvider(model=model)
+
+
+NewZhipuOpenAIProvider = new_zhipu_openai_provider
 ```
 
 ### 第 3 步：实现 Claude 格式适配器（兼容智谱）
 
-得益于智谱强大的生态兼容能力，它的 API 同样支持接收 Anthropic（Claude）标准的请求体。我们现在编写 claude.go。
+得益于智谱强大的生态兼容能力，它的 API 同样支持接收 Anthropic（Claude）标准的请求体。我们现在编写 claude.py。
 
 注意对比这里与 OpenAI 在 InputSchema 解析上的细微差异：Anthropic 官方 SDK 将工具的 Properties 和 Required 字段做了严格的结构体抽离。
-```
-// internal/provider/claude.go
-package provider
+```python
+# internal/provider/claude.py
+import json
+import os
+from typing import Any, List, Optional
 
-import (
- "context"
- "encoding/json"
- "fmt"
- "os"
+from ..schema.message import Message, Role, ToolCall, ToolDefinition
+from .interface import LLMProvider
 
- "github.com/anthropics/anthropic-sdk-go"
- "github.com/anthropics/anthropic-sdk-go/option"
- "github.com/yourname/go-tiny-claw/internal/schema"
-)
+ZHIPU_BASE_URL = "https://open.bigmodel.cn/api/paas/v4/"
 
-type ClaudeProvider struct {
-    client anthropic.Client
-    model  string
-}
 
-func NewZhipuClaudeProvider(model string) *ClaudeProvider {
-    apiKey := os.Getenv("ZHIPU_API_KEY")
- if apiKey == "" {
- panic("请设置 ZHIPU_API_KEY 环境变量")
-    }
-    baseURL := "https://open.bigmodel.cn/api/paas/v4/"
- return &ClaudeProvider{
-        client: anthropic.NewClient(option.WithAPIKey(apiKey), option.WithBaseURL(baseURL)),
-        model:  model,
-    }
-}
+def _get_attr(obj: Any, name: str, default: Any = None) -> Any:
+    if isinstance(obj, dict):
+        return obj.get(name, default)
+    return getattr(obj, name, default)
 
-func (p *ClaudeProvider) Generate(ctx context.Context, msgs []schema.Message, availableTools []schema.ToolDefinition) (*schema.Message, error) {
- var anthropicMsgs []anthropic.MessageParam
- var systemPrompt string
 
- // 1. 消息翻译
- for _, msg := range msgs {
- switch msg.Role {
- case schema.RoleSystem:
-            systemPrompt = msg.Content
- case schema.RoleUser:
- if msg.ToolCallID != "" {
-                anthropicMsgs = append(anthropicMsgs, anthropic.NewUserMessage(
-                    anthropic.NewToolResultBlock(msg.ToolCallID, msg.Content, false),
-                ))
-            } else {
-                anthropicMsgs = append(anthropicMsgs, anthropic.NewUserMessage(
-                    anthropic.NewTextBlock(msg.Content),
-                ))
-            }
- case schema.RoleAssistant:
- var blocks []anthropic.ContentBlockParamUnion
- if msg.Content != "" {
-                blocks = append(blocks, anthropic.NewTextBlock(msg.Content))
-            }
+def _json_dumps(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
- // 将历史工具调用转回 Claude 特有的 ToolUseBlockParam
- for _, tc := range msg.ToolCalls {
- var inputMap map[string]interface{}
-                _ = json.Unmarshal(tc.Arguments, &inputMap)
-                blocks = append(blocks, anthropic.ContentBlockParamUnion{
-                    OfToolUse: &anthropic.ToolUseBlockParam{
-                        ID:    tc.ID,
-                        Name:  tc.Name,
-                        Input: inputMap,
-                    },
-                })
-            }
- if len(blocks) > 0 {
-                anthropicMsgs = append(anthropicMsgs, anthropic.NewAssistantMessage(blocks...))
-            }
-        }
-    }
 
- // 2. 工具 Schema 翻译
- var anthropicTools []anthropic.ToolUnionParam
- for _, toolDef := range availableTools {
- // ToolInputSchemaParam 是结构体，需要通过 Properties 字段精准填充
- var properties map[string]any
- var required []string
+class ClaudeProvider(LLMProvider):
+    """使用 Anthropic Python SDK 访问智谱兼容接口的 Provider。"""
 
- if m, ok := toolDef.InputSchema.(map[string]interface{}); ok {
- if p, ok := m["properties"].(map[string]interface{}); ok {
-                properties = p
-            }
- if r, ok := m["required"].([]string); ok {
-                required = r
-            }
+    def __init__(
+        self,
+        model: str,
+        client: Any = None,
+        api_key: Optional[str] = None,
+        base_url: str = ZHIPU_BASE_URL,
+        max_tokens: int = 4096,
+    ):
+        self.model = model
+        self.base_url = base_url
+        self.max_tokens = max_tokens
+        self.client = client or self._build_client(api_key=api_key, base_url=base_url)
+
+    @staticmethod
+    def _build_client(api_key: Optional[str], base_url: str) -> Any:
+        """构造函数：基于 Anthropic Python SDK，指向智谱底座"""
+        api_key = api_key or os.getenv("ZHIPU_API_KEY")
+        if not api_key:
+            raise ValueError("请设置 ZHIPU_API_KEY 环境变量")
+
+        try:
+            from anthropic import Anthropic
+        except ImportError as exc:
+            raise ImportError("请先安装 anthropic 包，例如: pip install anthropic") from exc
+
+        return Anthropic(api_key=api_key, base_url=base_url)
+
+    def generate(
+        self,
+        messages: List[Message],
+        available_tools: Optional[List[ToolDefinition]],
+    ) -> Message:
+        # 1. 消息翻译
+        system_prompt, request_messages = self._messages_to_anthropic(messages)
+        params = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": request_messages,
         }
 
-        tp := anthropic.ToolParam{
-            Name:        toolDef.Name,
-            Description: anthropic.String(toolDef.Description),
-            InputSchema: anthropic.ToolInputSchemaParam{
-                Properties: properties,
-                Required:   required,
-            },
+        if system_prompt:
+            params["system"] = system_prompt
+
+        # 2. 工具 Schema 翻译
+        anthropic_tools = self._tools_to_anthropic(available_tools)
+        if anthropic_tools:
+            params["tools"] = anthropic_tools
+
+        # 3. 构建请求并发送
+        try:
+            response = self.client.messages.create(**params)
+        except Exception as exc:
+            raise RuntimeError(f"Claude/Zhipu API 请求失败: {exc}") from exc
+
+        # 4. 反向解析
+        return self._message_from_anthropic(response)
+
+    def _messages_to_anthropic(
+        self, messages: List[Message]
+    ) -> tuple[str, List[dict[str, Any]]]:
+        """消息翻译"""
+        system_prompt = ""
+        anthropic_messages: List[dict[str, Any]] = []
+
+        for message in messages:
+            if message.role == Role.SYSTEM:
+                system_prompt = message.content
+                continue
+
+            if message.role == Role.USER:
+                anthropic_messages.append(self._user_message_to_anthropic(message))
+                continue
+
+            if message.role == Role.ASSISTANT:
+                assistant_message = self._assistant_message_to_anthropic(message)
+                if assistant_message is not None:
+                    anthropic_messages.append(assistant_message)
+                continue
+
+            raise ValueError(f"不支持的消息角色: {message.role}")
+
+        return system_prompt, anthropic_messages
+
+    def _user_message_to_anthropic(self, message: Message) -> dict[str, Any]:
+        if message.tool_call_id:
+            return {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": message.tool_call_id,
+                        "content": message.content,
+                        "is_error": False,
+                    }
+                ],
+            }
+        return {
+            "role": "user",
+            "content": [{"type": "text", "text": message.content}],
         }
-        anthropicTools = append(anthropicTools, anthropic.ToolUnionParam{OfTool: &tp})
-    }
 
- // 3. 构建请求并发送
-    params := anthropic.MessageNewParams{
-        Model:     anthropic.Model(p.model),
-        MaxTokens: 4096,
-        Messages:  anthropicMsgs,
-    }
+    def _assistant_message_to_anthropic(
+        self, message: Message
+    ) -> Optional[dict[str, Any]]:
+        blocks: List[dict[str, Any]] = []
+        if message.content:
+            blocks.append({"type": "text", "text": message.content})
 
- if systemPrompt != "" {
-        params.System = []anthropic.TextBlockParam{
-            {Text: systemPrompt},
-        }
-    }
+        # 将历史工具调用转回 Claude 特有的 ToolUseBlock
+        for tool_call in message.tool_calls or []:
+            blocks.append(
+                {
+                    "type": "tool_use",
+                    "id": tool_call.id,
+                    "name": tool_call.name,
+                    "input": self._decode_tool_arguments(tool_call.arguments),
+                }
+            )
 
- if len(anthropicTools) > 0 {
-        params.Tools = anthropicTools
-    }
+        if not blocks:
+            return None
 
-    resp, err := p.client.Messages.New(ctx, params)
- if err != nil {
- return nil, fmt.Errorf("Claude/Zhipu API 请求失败: %w", err)
-    }
+        return {"role": "assistant", "content": blocks}
 
- // 4. 反向解析
-    resultMsg := &schema.Message{
-        Role: schema.RoleAssistant,
-    }
+    def _tools_to_anthropic(
+        self, available_tools: Optional[List[ToolDefinition]]
+    ) -> List[dict[str, Any]]:
+        """工具 Schema 翻译 (适配 Anthropic 格式)"""
+        anthropic_tools: List[dict[str, Any]] = []
+        for tool in available_tools or []:
+            # input_schema 需要通过 Properties 字段精准填充
+            normalized_schema = self._normalize_input_schema(tool.input_schema)
+            anthropic_tools.append(
+                {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": normalized_schema,
+                }
+            )
+        return anthropic_tools
 
- for _, block := range resp.Content {
- switch block.Type {
- case "text":
-            resultMsg.Content += block.Text
- case "tool_use":
-            argsBytes, _ := json.Marshal(block.Input)
-            resultMsg.ToolCalls = append(resultMsg.ToolCalls, schema.ToolCall{
-                ID:        block.ID,
-                Name:      block.Name,
-                Arguments: argsBytes,
-            })
-        }
-    }
+    def _normalize_input_schema(self, input_schema: Any) -> dict[str, Any]:
+        if input_schema is None:
+            return {"type": "object", "properties": {}}
+        if isinstance(input_schema, dict):
+            return input_schema
+        try:
+            normalized = json.loads(_json_dumps(input_schema))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"工具入参 Schema 不是合法 JSON 对象: {input_schema!r}") from exc
+        if not isinstance(normalized, dict):
+            raise ValueError(f"工具入参 Schema 必须是字典对象: {input_schema!r}")
+        return normalized
 
- return resultMsg, nil
-}
+    def _message_from_anthropic(self, response: Any) -> Message:
+        """反向解析：将 Anthropic API 响应翻译为内部 Message"""
+        content_blocks = _get_attr(response, "content", []) or []
+        result = Message(role=Role.ASSISTANT, content="")
+        tool_calls: List[ToolCall] = []
+
+        for block in content_blocks:
+            block_type = _get_attr(block, "type")
+            if block_type == "text":
+                result.content += _get_attr(block, "text", "") or ""
+            elif block_type == "tool_use":
+                tool_calls.append(
+                    ToolCall(
+                        id=_get_attr(block, "id", ""),
+                        name=_get_attr(block, "name", ""),
+                        arguments=_get_attr(block, "input", {}) or {},
+                    )
+                )
+
+        result.tool_calls = tool_calls or None
+        return result
+
+    def _decode_tool_arguments(self, arguments: Any) -> Any:
+        if arguments in (None, ""):
+            return {}
+        if isinstance(arguments, bytes):
+            arguments = arguments.decode("utf-8")
+        if not isinstance(arguments, str):
+            return arguments
+        try:
+            return json.loads(arguments)
+        except json.JSONDecodeError:
+            return arguments
+
+
+# 构造函数别名，指向智谱底座
+def new_zhipu_claude_provider(model: str) -> ClaudeProvider:
+    return ClaudeProvider(model=model)
+
+
+NewZhipuClaudeProvider = new_zhipu_claude_provider
 ```
 
 ## 运行与深度分析：算力分配与“自适应推理”
@@ -404,86 +550,88 @@ func (p *ClaudeProvider) Generate(ctx context.Context, msgs []schema.Message, av
 
 在上一讲中，我们在架构上剥离出了独立的 Thinking（推理）阶段，以防止模型在面对复杂代码时变成盲目执行的“莽夫”。
 
-然而，如果任务仅仅是：“帮我查查北京的天气”，开启长篇大论的慢思考是否值得？让我们通过 cmd/claw/main.go，传入一个 mockRegistry（伪造查询天气工具，真实的 ToolRegistry 将在下一讲实现），分别在开启和关闭慢思考模式下，观察这台微型操作系统的真实反应。
-```
-// cmd/claw/main.go
-package main
+然而，如果任务仅仅是：”帮我查查北京的天气”，开启长篇大论的慢思考是否值得？让我们通过 cmd/claw/main.py，传入一个 MockRegistry（伪造查询天气工具，真实的 ToolRegistry 将在下一讲实现），分别在开启和关闭慢思考模式下，观察这台微型操作系统的真实反应。
+```python
+# cmd/claw/main.py
+import os
+import logging
+from typing import List
 
-import (
- "context"
- "log"
- "os"
+from internal.engine.loop import AgentEngine
+from internal.provider.openai import NewZhipuOpenAIProvider
+from internal.schema.message import Message, Role, ToolCall, ToolDefinition, ToolResult
 
- "github.com/yourname/go-tiny-claw/internal/engine"
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/schema"
-)
+logger = logging.getLogger(__name__)
 
-// 伪造的工具注册表 (用于测试 Provider 的工具提取能力)
-type mockRegistry struct{}
 
-func (m *mockRegistry) GetAvailableTools() []schema.ToolDefinition {
- return []schema.ToolDefinition{
-        {
-            Name:        "get_weather",
-            Description: "获取指定城市的当前天气情况。",
-            InputSchema: map[string]interface{}{
- "type": "object",
- "properties": map[string]interface{}{
- "city": map[string]interface{}{
- "type": "string",
+# 伪造的工具注册表 (用于测试 Provider 的工具提取能力)
+class MockRegistry:
+    """Mock Registry，用于测试 Provider 的工具提取能力。"""
+
+    def get_available_tools(self) -> List[ToolDefinition]:
+        return [
+            ToolDefinition(
+                name="get_weather",
+                description="获取指定城市的当前天气情况。",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "city": {
+                            "type": "string",
+                        },
                     },
+                    "required": ["city"],
                 },
- "required": []string{"city"},
-            },
-        },
-    }
-}
+            ),
+        ]
 
-func (m *mockRegistry) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
-    log.Printf("  -> [Mock 工具执行] 获取 %s 的天气中...\n", call.Name)
- return schema.ToolResult{
-        ToolCallID: call.ID,
-        Output:     "API 返回：今天是晴天，气温 25 度。",
-        IsError:    false,
-    }
-}
+    def execute(self, call: ToolCall) -> ToolResult:
+        logger.info("  -> [Mock 工具执行] 获取 %s 的天气中...", call.name)
+        return ToolResult(
+            tool_call_id=call.id,
+            output="API 返回：今天是晴天，气温 25 度。",
+            is_error=False,
+        )
 
-func main() {
- // 确保已设置 ZHIPU_API_KEY
- if os.Getenv("ZHIPU_API_KEY") == "" {
-        log.Fatal("请先导出 ZHIPU_API_KEY 环境变量")
-    }
 
-    workDir, _ := os.Getwd()
+def main():
+    # 确保已设置 ZHIPU_API_KEY
+    if not os.getenv("ZHIPU_API_KEY"):
+        raise RuntimeError("请先导出 ZHIPU_API_KEY 环境变量")
 
- // 1. 初始化真实的 Provider大脑 (指向智谱 GLM-4.5)
- // 这里你可以任意切换 NewZhipuClaudeProvider 或 NewZhipuOpenAIProvider，效果完全一致！
-    llmProvider := provider.NewZhipuOpenAIProvider("glm-4.5-air")
+    work_dir = os.getcwd()
 
- // 2. 注入伪造的工具注册表
-    registry := &mockRegistry{}
+    # 1. 初始化真实的 Provider 大脑 (指向智谱 GLM-4.5)
+    # 这里你可以任意切换 NewZhipuClaudeProvider 或 NewZhipuOpenAIProvider，效果完全一致！
+    llm_provider = NewZhipuOpenAIProvider("glm-4.5-air")
 
- // 3. 实例化并运行引擎，开启 EnableThinking = true (开启慢思考阶段！)
-    eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
+    # 2. 注入伪造的工具注册表
+    registry = MockRegistry()
 
- // 设定测试任务
-    prompt := "我想去北京跑步，帮我查查天气适合吗？"
+    # 3. 实例化并运行引擎，开启 EnableThinking = True (开启慢思考阶段！)
+    eng = AgentEngine(llm_provider, registry, work_dir, enable_thinking=True)
 
-    err := eng.Run(context.Background(), prompt)
- if err != nil {
-        log.Fatalf("引擎运行崩溃: %v", err)
-    }
-}
+    # 设定测试任务
+    prompt = "我想去北京跑步，帮我查查天气适合吗？"
+
+    try:
+        eng.run(prompt)
+    except Exception as e:
+        logger.error("引擎运行崩溃: %s", e)
+        raise
+
+
+if __name__ == "__main__":
+    main()
 ```
 
 ### 测试 1：开启慢思考 (EnableThinking = true)
-```
-// 实例化并运行引擎，开启慢思考
-eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
+```python
+# 实例化并运行引擎，开启慢思考
+eng = AgentEngine(llm_provider, registry, work_dir, enable_thinking=True)
 ```
 
-执行 go run cmd/claw/main.go，观察日志：
+执行 python cmd/claw/main.py，观察日志：
 ```
 [Engine] 慢思考模式 (Thinking Phase): true
 
@@ -519,10 +667,10 @@ eng := engine.NewAgentEngine(llmProvider, registry, workDir, true)
 
 ### 测试 2：关闭慢思考（EnableThinking = false）
 
-现在，我们在 main.go 中将开关调为 false：
-```
-// 实例化并运行引擎，关闭慢思考
-eng := engine.NewAgentEngine(llmProvider, registry, workDir, false)
+现在，我们在 main.py 中将开关调为 False：
+```python
+# 实例化并运行引擎，关闭慢思考
+eng = AgentEngine(llm_provider, registry, work_dir, enable_thinking=False)
 ```
 
 再次运行程序，日志变得极其清爽干练：
@@ -574,10 +722,10 @@ eng := engine.NewAgentEngine(llmProvider, registry, workDir, false)
 
 ## 思考题
 
-在当前的 Provider 适配器中，我们使用的是阻塞式调用（例如：client.Chat.Completions.New(ctx, params)）。这意味着如果大模型在进行 Phase 1 的长篇大论“思考”时，整个程序会阻塞卡死十多秒钟，直到模型把所有的推理和工具调用 JSON 全都生成完毕后，引擎才能一次性拿到结果。这在 CLI 工具体验中是非常差的。
+在当前的 Provider 适配器中，我们使用的是阻塞式调用（例如：client.chat.completions.create(**params)）。这意味着如果大模型在进行 Phase 1 的长篇大论”思考”时，整个程序会阻塞卡死十多秒钟，直到模型把所有的推理和工具调用 JSON 全都生成完毕后，引擎才能一次性拿到结果。这在 CLI 工具体验中是非常差的。
 
 实际生产中，各大模型的 API 均支持 Streaming（流式响应，Server-Sent Events）。大模型会一个字符一个字符地将文本推送过来，甚至 ToolCall 的 JSON 也是一块块吐出的。
 
-结合你对 Go 语言 channel（通道）和 goroutine（协程）的理解，如果要把我们的 LLMProvider 改造为支持流式返回的接口，它的函数签名应该怎么设计？引擎的 Main Loop 又该如何优雅地边接收流式字符边打印，同时还能正确拼接出最终完整的 schema.Message 呢？
+结合你对 Python 异步编程（asyncio）和生成器（generator）的理解，如果要把我们的 LLMProvider 改造为支持流式返回的接口，它的函数签名应该怎么设计？引擎的 Main Loop 又该如何优雅地边接收流式字符边打印，同时还能正确拼接出最终完整的 schema.Message 呢？
 
 欢迎在留言区写下你的接口设计草案。我们下一讲，开启工具与交互层！

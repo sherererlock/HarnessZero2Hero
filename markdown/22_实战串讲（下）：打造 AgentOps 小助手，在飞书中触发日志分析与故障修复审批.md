@@ -1,6 +1,6 @@
 你好，我是 Tony Bai。欢迎来到《从 0 开始构建 Agent Harness》专栏的第二十二讲。
 
-在上一讲中，我们拼装出了 go-tiny-claw 的 CLI 命令行版本。面对一个包含并发 Bug 的未知代码库，Agent 仅凭极简的 4 大工具集（Read / Write / Edit / Bash）和强大的上下文引擎，就自主完成了“探索文件 -> 分析并发缺陷 -> 给出多种修复方案 -> 修改代码 -> 运行测试验证”的闭环。
+在上一讲中，我们拼装出了 tiny-claw 的 CLI 命令行版本。面对一个包含并发 Bug 的未知代码库，Agent 仅凭极简的 4 大工具集（Read / Write / Edit / Bash）和强大的上下文引擎，就自主完成了”探索文件 -> 分析并发缺陷 -> 给出多种修复方案 -> 修改代码 -> 运行测试验证”的闭环。
 
 在开发者个人的电脑上，这种畅快淋漓的 YOLO（You Only Live Once，全权信任）模式极大地释放了生产力。
 
@@ -12,7 +12,7 @@
 
 因此，在工业级的 Harness Engineering（驾驭工程）中，ChatOps（对话驱动运维）+ Human-in-the-loop（人工审批拦截） 才是很多 Agent 的落地形态。
 
-这一讲，我们将完成这场宏大工程的最后一次端到端实战大考。我们将把 go-tiny-claw 作为一个后台守护进程（Daemon）运行在服务器上，对接飞书 Webhook。通过强大的 Middleware 机制，我们将实现在飞书群里指挥 Agent 排查日志，并在它试图执行危险命令时，在飞书中弹出审批拦截，让人类投下最终的赞成票。
+这一讲，我们将完成这场宏大工程的最后一次端到端实战大考。我们将把 tiny-claw 作为一个后台守护进程（Daemon）运行在服务器上，对接飞书 Webhook。通过强大的 Middleware 机制，我们将实现在飞书群里指挥 Agent 排查日志，并在它试图执行危险命令时，在飞书中弹出审批拦截，让人类投下最终的赞成票。
 
 你可能会问：“在第 16 讲中，我们不是已经做过飞书的拦截测试了吗？今天的实战有什么不同？”
 
@@ -34,7 +34,7 @@ OOM 考验：读取 error.log 时，可能随时触发的 Compactor 的掩码压
 
 在开始写代码前，我们先通过一张时序图，复习并整合我们在专栏前面讲到的所有关于“安全与通信”的基础设施。
 
-请仔细观察这套架构的优雅之处：大模型的“大脑”和飞书的“交互”分布在两个完全不同的协程（Goroutine）中，它们通过 channel 实现了完美的同步阻塞与唤醒。
+请仔细观察这套架构的优雅之处：大模型的”大脑”和飞书的”交互”分布在两个完全不同的协程（Goroutine）中，它们通过 channel 实现了完美的同步阻塞与唤醒。
 
 ![](img/22_01.webp)
 
@@ -44,16 +44,16 @@ OOM 考验：读取 error.log 时，可能随时触发的 Compactor 的掩码压
 
 ### 目录结构回顾与更新
 
-为了保持代码的整洁，我们不在上一讲的 CLI 入口上修改，而是新建一个专门用于服务端守护进程的入口 cmd/agentops/main.go。
+为了保持代码的整洁，我们不在上一讲的 CLI 入口上修改，而是新建一个专门用于服务端守护进程的入口 cmd/agentops/main.py。
 
 整个项目的依赖结构如下，我们将完美复用之前编写的所有模块：
 ```
-go-tiny-claw/
+tiny-claw/
 ├── cmd/
 │   ├── claw/                # (上一讲的本地 CLI 入口)
 │   ├── bench/               # (第 20 讲的自动化跑分入口)
 │   └── agentops/
-│       └── main.go          # 【本次核心】基于飞书 Webhook 的服务端全要素入口
+│       └── main.py          # 【本次核心】基于飞书 Webhook 的服务端全要素入口
 ├── internal/
 │   ├── context/             # Composer (处理 AGENTS.md), Compactor (处理内存)
 │   ├── engine/              # MainLoop, Session, Reminders, Reporter
@@ -63,8 +63,7 @@ go-tiny-claw/
 │   ├── provider/            # Claude / Zhipu 适配器
 │   ├── schema/              # 统一消息定义
 │   └── tools/               # Registry, Middleware, Bash/Read/Write/Edit 工具
-├── go.mod
-└── go.sum
+└── requirements.txt
 ```
 
 ### 第 1 步：准备服务器工作区与外部知识（AGENTS.md & Skills）
@@ -127,339 +126,361 @@ description: Nginx 故障排查与修复标准作业程序 (SOP)。当人类报�
 
 我们将引入 AgentEngineFactory，让每次收到消息时动态组装引擎；同时，定义特定的 reporterKey，把专属的 FeishuReporter 塞进 Context，传给底层的 Middleware 去拿。
 
-下面是重构后的internal/feishu/bot.go代码：
-```
-// internal/feishu/bot.go
-package feishu
+下面是重构后的internal/feishu/bot.py代码：
+```python
+# internal/feishu/bot.py
+import json
+import logging
+import os
+import threading
+from typing import Any, Callable, Optional
 
-import (
- "context"
- "encoding/json"
- "fmt"
- "log"
- "os"
- "strings"
+import lark_oapi as lark
+import lark_oapi.api.im.v1 as larkim
 
-    lark "github.com/larksuite/oapi-sdk-go/v3"
- "github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
-    larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
-    ctxpkg "github.com/yourname/go-tiny-claw/internal/context"
- "github.com/yourname/go-tiny-claw/internal/engine"
- "github.com/yourname/go-tiny-claw/internal/schema"
-)
+from internal.engine.reportor import Reporter
+from internal.engine.session import GlobalSessionMgr, Session
+from internal.feishu.approval import GlobalApprovalMgr
+from internal.schema.message import Message, Role
 
-// ==========================================
-// 1. Context 传递机制：解决并发 Reporter 的提取
-// ==========================================
 
-// reporterKey 定义 Context 中存放 Reporter 的专属键
-type reporterKey struct{}
+# ==========================================
+# 1. 飞书 Bot 核心调度器
+# ==========================================
 
-// ContextWithReporter 将专属的 Reporter 封入上下文
-func ContextWithReporter(ctx context.Context, r engine.Reporter) context.Context {
- return context.WithValue(ctx, reporterKey{}, r)
-}
+# AgentEngineFactory 允许每次收到消息时，根据 Session 动态创建引擎
+# 类型签名：接收 Session，返回 AgentEngine 实例
+AgentEngineFactory = Callable[[Session], Any]
 
-// ReporterFromContext 供底层的 Middleware 提取专属的 Reporter 发送审批卡片
-func ReporterFromContext(ctx context.Context) engine.Reporter {
- if r, ok := ctx.Value(reporterKey{}).(engine.Reporter); ok {
- return r
-    }
- return nil
-}
 
-// ==========================================
-// 2. 飞书 Bot 核心调度器
-// ==========================================
+class FeishuBot:
+    """飞书 Bot 核心调度器，支持工厂模式动态创建引擎。"""
 
-// AgentEngineFactory 允许每次收到消息时，根据 Session 动态创建引擎
-type AgentEngineFactory func(session *ctxpkg.Session) *engine.AgentEngine
+    def __init__(
+        self,
+        factory: AgentEngineFactory,
+        work_dir: str,
+        client: Optional[Any] = None,
+    ):
+        app_id = os.getenv("FEISHU_APP_ID", "")
+        app_secret = os.getenv("FEISHU_APP_SECRET", "")
 
-type FeishuBot struct {
-    client  *lark.Client
-    appID   string
-    appSecret string
-    workDir   string // 保存从入口传来的工作区路径
-    factory AgentEngineFactory // 替换掉原来的单一 engine 引用
-}
+        if not app_id or not app_secret:
+            raise RuntimeError("请设置 FEISHU_APP_ID 和 FEISHU_APP_SECRET")
 
-func NewFeishuBotWithFactory(factory AgentEngineFactory) *FeishuBot {
-    appID := os.Getenv("FEISHU_APP_ID")
-    appSecret := os.Getenv("FEISHU_APP_SECRET")
+        self.app_id = app_id
+        self.app_secret = app_secret
+        self.work_dir = work_dir  # 保存从入口传来的工作区路径
+        self.factory = factory    # 替换掉原来的单一 engine 引用
+        self.client = client or self._build_client()
 
- if appID == "" || appSecret == "" {
-        log.Fatal("请设置 FEISHU_APP_ID 和 FEISHU_APP_SECRET")
-    }
+    def _build_client(self) -> Any:
+        return (
+            lark.Client.builder()
+            .app_id(self.app_id)
+            .app_secret(self.app_secret)
+            .build()
+        )
 
-    client := lark.NewClient(appID, appSecret)
+    def get_event_dispatcher(self):
+        """获取飞书事件分发器，用于注册 Webhook 回调。"""
+        encrypt_key = os.getenv("FEISHU_ENCRYPT_KEY", "")
+        verify_token = os.getenv("FEISHU_VERIFY_TOKEN", "")
 
- return &FeishuBot{
-        client:    client,
-        appID:     appID,
-        appSecret: appSecret,
-        workDir:   workDir, // 接收外部传入的路径
-        factory:   factory,
-    }
-}
+        def on_message_receive(ctx: Any, event: Any) -> None:
+            content_str = event.event.message.content
+            # 解析飞书消息的 JSON 文本字段
+            if content_str.startswith('{"text":"'):
+                content_str = content_str[9:-2]
 
-func (b *FeishuBot) GetEventDispatcher() *dispatcher.EventDispatcher {
-    encryptKey := os.Getenv("FEISHU_ENCRYPT_KEY")
-    verifyToken := os.Getenv("FEISHU_VERIFY_TOKEN")
+            chat_id = event.event.message.chat_id
+            logging.info("[Feishu] 收到会话 %s 消息: %s", chat_id, content_str)
 
-    handler := dispatcher.NewEventDispatcher(verifyToken, encryptKey).
-        OnP2MessageReceiveV1(func(ctx context.Context, event *larkim.P2MessageReceiveV1) error {
-            contentStr := *event.Event.Message.Content
-            contentStr = strings.TrimPrefix(contentStr, `{"text":"`)
-            contentStr = strings.TrimSuffix(contentStr, `"}`)
+            # 拦截人工审批的特殊口令，并唤醒挂起的 Registry 线程
+            if content_str.startswith("approve "):
+                task_id = content_str.removeprefix("approve ").strip()
+                GlobalApprovalMgr.resolve_approval(task_id, True, "人类管理员已批准操作")
+                logging.info("[Feishu] 会话 %s: 已为您批准任务 %s", chat_id, task_id)
+                return
 
-            chatId := *event.Event.Message.ChatId
-            log.Printf("[Feishu] 收到会话 %s 消息: %s\n", chatId, contentStr)
+            if content_str.startswith("reject "):
+                task_id = content_str.removeprefix("reject ").strip()
+                GlobalApprovalMgr.resolve_approval(task_id, False, "人类管理员认为该操作存在极高风险，已无情拒绝")
+                logging.info("[Feishu] 会话 %s: 已拒绝任务 %s", chat_id, task_id)
+                return
 
- // 拦截人工审批的特殊口令，并唤醒挂起的 Registry 协程
- if strings.HasPrefix(contentStr, "approve ") {
-                taskID := strings.TrimPrefix(contentStr, "approve ")
-                taskID = strings.TrimSpace(taskID)
-                GlobalApprovalMgr.ResolveApproval(taskID, true, "人类管理员已批准操作")
-                log.Printf("[Feishu] 会话 %s: ✅ 已为您批准任务 %s", chatId, taskID)
- return nil
-            }
- if strings.HasPrefix(contentStr, "reject ") {
-                taskID := strings.TrimPrefix(contentStr, "reject ")
-                taskID = strings.TrimSpace(taskID)
-                GlobalApprovalMgr.ResolveApproval(taskID, false, "人类管理员认为该操作存在极高风险，已无情拒绝")
-                log.Printf("[Feishu] 会话 %s: 🚫 已拒绝任务 %s", chatId, taskID)
- return nil
-            }
+            # 如果是普通对话，新开一个守护线程去启动 Agent，防止阻塞 Webhook
+            threading.Thread(
+                target=self.handle_agent_run,
+                args=(chat_id, content_str),
+                daemon=True,
+            ).start()
 
- // 如果是普通对话，新开一个 Goroutine 去启动 Agent，防止阻塞 Webhook
- go b.handleAgentRun(chatId, contentStr)
+        def on_message_read(ctx: Any, event: Any) -> None:
+            # 消息已读事件，静默忽略
+            pass
 
- return nil
-        }).
-        OnP2MessageReadV1(func(ctx context.Context, event *larkim.P2MessageReadV1) error {
- // 消息已读事件，静默忽略
- return nil
-        })
+        # 构建事件分发器并注册回调
+        handler = (
+            lark.EventDispatcher.builder(verify_token, encrypt_key)
+            .register_p2_im_message_receive_v1(on_message_receive)
+            .register_p2_im_message_read_v1(on_message_read)
+            .build()
+        )
+        return handler
 
- return handler
-}
+    def handle_agent_run(self, chat_id: str, prompt: str) -> None:
+        """为当前并发请求组装专属的引擎并运行 Agent。"""
+        # 为当前并发请求实例化一个专属的 Reporter
+        reporter = FeishuReporter(client=self.client, chat_id=chat_id)
 
-func (b *FeishuBot) handleAgentRun(chatId string, prompt string) {
- // 为当前并发请求实例化一个专属的 Reporter
-    reporter := &FeishuReporter{
-        client: b.client,
-        chatId: chatId,
-    }
+        # 1. 获取物理隔离的 Session
+        sess = GlobalSessionMgr.get_or_create(chat_id, self.work_dir)
+        sess.append(Message(role=Role.USER, content=prompt))
 
- // 1. 获取物理隔离的 Session
-    sess := ctxpkg.GlobalSessionMgr.GetOrCreate(chatId, b.workDir)
-    sess.Append(schema.Message{Role: schema.RoleUser, Content: prompt})
+        # 2. 通过工厂模式，为当前会话生成一个挂好了专属 CostTracker 的新引擎
+        eng = self.factory(sess)
 
- // 2. 通过工厂模式，为当前会话生成一个挂好了专属 CostTracker 的新引擎
-    eng := b.factory(sess)
+        # 3. 【驾驭核心】：将专属的 reporter 直接传给引擎运行！
+        err = eng.run(prompt, session=sess, reporter=reporter)
+        if err is not None:
+            reporter.send_msg(f"❌ Agent 运行崩溃: {err}")
 
- // 3. 【驾驭核心】：将专属的 reporter 塞入 Context 并传给引擎！
-    runCtx := ContextWithReporter(context.Background(), reporter)
 
- if err := eng.Run(runCtx, sess, reporter); err != nil {
-        reporter.sendMsg(fmt.Sprintf("❌ Agent 运行崩溃: %v", err))
-    }
-}
+# ==========================================
+# 2. 飞书 Reporter 实现
+# ==========================================
 
-// ==========================================
-// 3. 飞书 Reporter 实现 ()
-// ==========================================
+class FeishuReporter(Reporter):
+    """将引擎输出格式化后发给飞书。"""
 
-type FeishuReporter struct {
-    client *lark.Client
-    chatId string
-}
+    def __init__(self, client: Any, chat_id: str):
+        self.client = client
+        self.chat_id = chat_id
 
-func (r *FeishuReporter) sendMsg(text string) {
-    textContent := map[string]string{
- "text": text,
-    }
-    contentBytes, _ := json.Marshal(textContent)
-    contentStr := string(contentBytes)
+    def send_msg(self, text: str) -> None:
+        """发送纯文本消息到飞书群聊。"""
+        content = json.dumps({"text": text}, ensure_ascii=False)
+        request = (
+            larkim.CreateMessageRequest.builder()
+            .receive_id_type("chat_id")
+            .request_body(
+                larkim.CreateMessageRequestBody.builder()
+                .receive_id(self.chat_id)
+                .msg_type("text")
+                .content(content)
+                .build()
+            )
+            .build()
+        )
+        self.client.im.v1.message.create(request)
 
-    msgReq := larkim.NewCreateMessageReqBuilder().
-        ReceiveIdType(larkim.ReceiveIdTypeChatId).
-        Body(larkim.NewCreateMessageReqBodyBuilder().
-            ReceiveId(r.chatId).
-            MsgType(larkim.MsgTypeText).
-            Content(contentStr).
-            Build()).
-        Build()
+    def on_thinking(self) -> None:
+        self.send_msg("🤔 模型正在慢思考 (Thinking)...")
 
-    _, _ = r.client.Im.Message.Create(context.Background(), msgReq)
-}
+    def on_tool_call(self, tool_name: str, args: str) -> None:
+        self.send_msg(f"🛠️ **正在执行工具**：`{tool_name}`\n参数：`{args}`")
 
-func (r *FeishuReporter) OnThinking(ctx context.Context) {
-    r.sendMsg("🤔 模型正在慢思考 (Thinking)...")
-}
+    def on_tool_result(self, tool_name: str, result: str, is_error: bool) -> None:
+        if is_error:
+            self.send_msg(f"⚠️ **执行报错** ({tool_name})：\n{result}")
+        else:
+            self.send_msg(f"✅ **执行成功** ({tool_name})")
 
-func (r *FeishuReporter) OnToolCall(ctx context.Context, toolName string, args string) {
-    r.sendMsg(fmt.Sprintf("🛠️ **正在执行工具**：`%s`\n参数：`%s`", toolName, args))
-}
+    def on_message(self, content: str) -> None:
+        self.send_msg(content)
 
-func (r *FeishuReporter) OnToolResult(ctx context.Context, toolName string, result string, isError bool) {
- if isError {
-        r.sendMsg(fmt.Sprintf("⚠️ **执行报错** (%s)：\n%s", toolName, result))
-    } else {
-        r.sendMsg(fmt.Sprintf("✅ **执行成功** (%s)", toolName))
-    }
-}
 
-func (r *FeishuReporter) OnMessage(ctx context.Context, content string) {
-    r.sendMsg(content)
-}
-
-// 确保 FeishuReporter 实现了 Reporter 接口
-var _ engine.Reporter = (*FeishuReporter)(nil)
+# 确保 FeishuReporter 实现了 Reporter 接口
+assert issubclass(FeishuReporter, Reporter)
 ```
 
 ### 第 3 步：调整危险命令判定逻辑
 
-为了配合下面的实战演示，我们设定的剧本是：Agent 在使用 edit_file 修改 Nginx 配置，以及使用 bash 执行 nginx -s reload 时，必须触发高危拦截，因此，我们打开 internal/feishu/approval.go，将 IsDangerousCommand 方法替换为以下代码：
+为了配合下面的实战演示，我们设定的剧本是：Agent 在使用 edit_file 修改 Nginx 配置，以及使用 bash 执行 nginx -s reload 时，必须触发高危拦截，因此，我们打开 internal/feishu/approval.py，将 is_dangerous_command 函数替换为以下代码：
+```python
+# internal/feishu/approval.py (局部修正)
+
+import re
+from typing import Any
+
+
+def is_dangerous_command(tool_name: str, args: Any) -> bool:
+    """简单的正则检查黑名单，判断该工具调用是否需要触发人类审批。"""
+    # 白名单放行：对于纯读取工具，默认 YOLO 模式，全部放行
+    if tool_name == "read_file":
+        return False
+
+    # 【剧本设定】：在生产服务器的 AgentOps 场景下，修改任何文件都是高危操作！
+    # 我们不允许 Agent 擅自使用 write_file 覆写文件，或使用 edit_file 篡改代码。
+    if tool_name in ("write_file", "edit_file"):
+        return True
+
+    # 针对 bash 的高危模式匹配
+    if tool_name == "bash":
+        # 将参数转为字符串以便正则匹配
+        arg_text = str(args) if not isinstance(args, str) else args
+
+        # 危险指令特征库 (模拟真实的运维黑名单)
+        dangerous_patterns = [
+            r"rm\s+-r",       # 级联删除
+            r"sudo\s+",       # 提权操作
+            r"drop\s+",       # 数据库危险命令
+            r">.*\.go",       # 恶意覆盖源代码
+            r"nginx\s+-s",    # 【针对第 22 讲剧本】：拦截 Nginx 服务重启或停止
+            r"systemctl\s+",  # 拦截系统级服务管理
+            r"kill\s+",       # 拦截杀进程操作
+        ]
+
+        for pattern in dangerous_patterns:
+            if re.search(pattern, arg_text):
+                return True  # 命中任何一条黑名单，必须挂起审批
+
+    # 如果没有命中高危特征，默认放行 (例如简单的 ls -la, tail -n 50 等探测命令)
+    return False
 ```
-// internal/feishu/approval.go (局部修正)
 
-// IsDangerousCommand 简单的正则检查黑名单，判断该工具调用是否需要触发人类审批
-func IsDangerousCommand(toolName string, args string) bool {
- // 白名单放行：对于纯读取工具，默认 YOLO 模式，全部放行
- if toolName == "read_file" {
- return false
-    }
+### 第 4 步：编写 AgentOps 服务端最终组装代码 (main.py)
 
- // 【剧本设定】：在生产服务器的 AgentOps 场景下，修改任何文件都是高危操作！
- // 我们不允许 Agent 擅自使用 write_file 覆写文件，或使用 edit_file 篡改代码。
- if toolName == "write_file" || toolName == "edit_file" {
- return true
-    }
+有了底层安全的 Middleware 拦截机制，我们 main.py 中的写法变得异常清爽。在这个文件中，我们将完成”大脑、工具、中间件、监控仪表盘、飞书 Webhook”的终极拼装。
+```python
+# cmd/agentops/main.py
+import logging
+import os
+import sys
+from typing import Any, Callable, Tuple
 
- // 针对 bash 的高危模式匹配
- if toolName == "bash" {
- // 危险指令特征库 (模拟真实的运维黑名单)
-        dangerousPatterns := []string{
- `rm\s+-r`,          // 级联删除
- `sudo\s+`,          // 提权操作
- `drop\s+`,          // 数据库危险命令
- `>.*\.go`,          // 恶意覆盖源代码
- `nginx\s+-s`,       // 【针对第 22 讲剧本】：拦截 Nginx 服务重启或停止
- `systemctl\s+`,     // 拦截系统级服务管理
- `kill\s+`,          // 拦截杀进程操作
-        }
+# 路径设置：确保可以导入 internal 模块
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, “../..”))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
- for _, p := range dangerousPatterns {
- if matched, _ := regexp.MatchString(p, args); matched {
- return true // 命中任何一条黑名单，必须挂起审批
-            }
-        }
-    }
+from internal.engine.loop import AgentEngine
+from internal.engine.session import GlobalSessionMgr, Session
+from internal.feishu.approval import GlobalApprovalMgr, is_dangerous_command
+from internal.feishu.bot import FeishuBot, FeishuReporter
+from internal.observability.tracker import new_cost_tracker
+from internal.provider.openai import new_zhipu_openai_provider
+from internal.tools.Bash import new_bash_tool
+from internal.tools.edit_file import new_edit_file_tool
+from internal.tools.readfile import new_read_file_tool
+from internal.tools.registry import new_registry
+from internal.tools.write import new_write_file_tool
 
- // 如果没有命中高危特征，默认放行 (例如简单的 ls -la, tail -n 50 等探测命令)
- return false
-}
-```
 
-### 第 4 步：编写 AgentOps 服务端最终组装代码 (main.go)
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format=”%(asctime)s [%(levelname)s] %(message)s”,
+        datefmt=”%Y/%m/%d %H:%M:%S”,
+    )
+    logging.info(“正在启动 tiny-claw AgentOps 飞书服务端...”)
 
-有了底层安全的 Context 传递机制，我们 main.go 中的 Middleware 写法变得异常清爽。在这个文件中，我们将完成“大脑、工具、中间件、监控仪表盘、飞书 Webhook”的终极拼装。
-```
-// cmd/agentops/main.go
-package main
+    if not os.getenv(“ZHIPU_API_KEY”) or not os.getenv(“FEISHU_APP_ID”):
+        logging.error(“请先导出 ZHIPU_API_KEY 和飞书相关的环境变量”)
+        sys.exit(1)
 
-import (
- "context"
- "log"
- "net/http"
- "os"
+    # 1. 设定监控的物理工作区
+    work_dir = os.path.join(os.getcwd(), “workspace”)
+    os.makedirs(work_dir, exist_ok=True)
 
- "github.com/larksuite/oapi-sdk-go/v3/core/httpserverext"
-    ctxpkg "github.com/yourname/go-tiny-claw/internal/context"
- "github.com/yourname/go-tiny-claw/internal/engine"
- "github.com/yourname/go-tiny-claw/internal/feishu"
- "github.com/yourname/go-tiny-claw/internal/observability"
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/schema"
- "github.com/yourname/go-tiny-claw/internal/tools"
-)
+    # 2. 初始化底层大脑与注册表
+    model_name = “glm-4.5-air”
+    llm_provider = new_zhipu_openai_provider(model_name)
 
-func main() {
-    log.Println("🚀 正在启动 go-tiny-claw AgentOps 飞书服务端...")
+    registry = new_registry()
+    registry.register(new_read_file_tool(work_dir))
+    registry.register(new_write_file_tool(work_dir))
+    registry.register(new_edit_file_tool(work_dir))
+    registry.register(new_bash_tool(work_dir))  # 必备的运维工具
 
- if os.Getenv("ZHIPU_API_KEY") == "" || os.Getenv("FEISHU_APP_ID") == "" {
-        log.Fatal("❌ 请先导出 ZHIPU_API_KEY 和 飞书相关的环境变量")
-    }
+    # 3. 【核心防御】：注入安全拦截 Middleware
+    # 注意：reporter 将在每次请求时通过闭包动态绑定，而非全局变量
+    def make_approval_middleware(reporter: Any) -> Callable:
+        “””工厂函数：为每个会话创建绑定了专属 Reporter 的审批中间件。”””
 
- // 1. 设定监控的物理工作区
-    workDir, _ := os.Getwd()
-    workDir += "/workspace"
- if err := os.MkdirAll(workDir, 0755); err != nil {
-        log.Fatalf("无法创建工作区: %v", err)
-    }
+        def approval_middleware(call) -> Tuple[bool, str]:
+            # 检查是否命中危险命令黑名单
+            if is_dangerous_command(call.name, call.arguments):
+                task_id = call.id
+                logging.info(
+                    “[Middleware] 拦截到高危操作: %s，触发飞书审批挂起...”,
+                    call.name,
+                )
 
- // 2. 初始化底层大脑与注册表
-    modelName := "glm-4.5-air"
-    llmProvider := provider.NewZhipuOpenAIProvider(modelName)
+                # 【驾驭核心】：使用当前会话专属的 Reporter 发送审批卡片！
+                # 当前线程死死挂起，向飞书发送卡片，等待人类决定
+                allowed, reason = GlobalApprovalMgr.wait_for_approval(
+                    task_id, call.name, call.arguments, reporter,
+                )
 
-    registry := tools.NewRegistry()
-    registry.Register(tools.NewReadFileTool(workDir))
-    registry.Register(tools.NewWriteFileTool(workDir))
-    registry.Register(tools.NewEditFileTool(workDir))
-    registry.Register(tools.NewBashTool(workDir)) // 必备的运维工具
+                if not allowed:
+                    return False, reason  # 拒绝，将理由作为 ToolResult 喂回给大模型
+                return True, “”  # 同意，放行底层物理执行
 
- // 3. 【核心防御】：注入安全拦截 Middleware
-    registry.Use(func(ctx context.Context, call schema.ToolCall) (bool, string) {
-        argsStr := string(call.Arguments)
+            # 普通读取命令，YOLO 放行
+            return True, “”
 
- // 检查是否命中危险命令黑名单
- if feishu.IsDangerousCommand(call.Name, argsStr) {
-            taskID := call.ID
-            log.Printf("[Middleware] 拦截到高危操作: %s，触发飞书审批挂起...\n", call.Name)
+        return approval_middleware
 
- // 【驾驭魔术】：从 Context 中优雅地取出专属于发起该请求群聊的 Reporter！
- // 注意这里的强转，因为我们在 WaitForApproval 中需要调用 FeishuReporter 特有的 sendMsg。
-            currentReporter, _ := feishu.ReporterFromContext(ctx).(*feishu.FeishuReporter)
+    logging.info(“安全防御 Middleware 已就绪（按请求动态挂载）。”)
 
- // 当前 Goroutine 死死挂起，向飞书发送卡片，等待人类决定
-            allowed, reason := feishu.GlobalApprovalMgr.WaitForApproval(taskID, call.Name, argsStr, currentReporter)
+    # 4. 动态 Factory 组装器：保证高并发调用的物理独立性与账单准确追踪
+    def engine_factory(session: Session, reporter: Any) -> AgentEngine:
+        “””为每个会话动态组装引擎，绑定专属的 CostTracker 和审批 Middleware。”””
+        # 让 Tracker 绑定当前特定用户的 Session 账本
+        tracked_provider = new_cost_tracker(
+            next_provider=llm_provider,
+            model_name=model_name,
+            session=session,
+        )
 
- if !allowed {
- return false, reason // 拒绝，将理由作为 ToolResult 喂回给大模型
-            }
- return true, "" // 同意，放行底层物理执行
-        }
+        # 为当前会话创建独立的 Registry，挂载绑定了专属 Reporter 的 Middleware
+        session_registry = new_registry()
+        session_registry.register(new_read_file_tool(work_dir))
+        session_registry.register(new_write_file_tool(work_dir))
+        session_registry.register(new_edit_file_tool(work_dir))
+        session_registry.register(new_bash_tool(work_dir))
+        session_registry.use(make_approval_middleware(reporter))
 
- // 普通读取命令，YOLO 放行
- return true, ""
-    })
-    log.Println("🛡️ 安全防御 Middleware 已挂载。")
+        # 返回一个新组装的 Engine 实例
+        return AgentEngine(
+            provider=tracked_provider,
+            registry=session_registry,
+            enable_thinking=False,
+            PlanMode=False,
+        )
 
- // 4. 动态 Factory 组装器：保证高并发调用的物理独立性与账单准确追踪
-    engineFactory := func(session *ctxpkg.Session) *engine.AgentEngine {
- // 让 Tracker 绑定当前特定用户的 Session 账本
-        trackedProvider := observability.NewCostTracker(llmProvider, modelName, session)
+    # 5. 初始化飞书 Bot 调度中心（继承 FeishuBot，覆写 handle_agent_run）
+    class AgentOpsFeishuBot(FeishuBot):
+        “””按请求动态装配引擎的 AgentOps 飞书 Bot。”””
 
- // 返回一个新组装的 Engine 实例
- return engine.NewAgentEngine(trackedProvider, registry, false, false)
-    }
+        def __init__(self, work_dir: str):
+            # 传入一个占位 factory，实际引擎在 handle_agent_run 中动态创建
+            super().__init__(factory=lambda sess: None, work_dir=work_dir)
 
- // 5. 初始化飞书 Bot 调度中心
-    bot := feishu.NewFeishuBotWithFactory(engineFactory, workDir)
-    handler := httpserverext.NewEventHandlerFunc(bot.GetEventDispatcher())
+        def handle_agent_run(self, chat_id: str, prompt: str) -> None:
+            “””为当前并发请求组装专属的引擎并运行 Agent。”””
+            reporter = self._get_or_create_reporter(chat_id)
+            session = GlobalSessionMgr.get_or_create(chat_id, self.work_dir)
 
- // 6. 注册 Webhook 路由并启动 HTTP Server
-    http.HandleFunc("/webhook/event", handler)
+            # 通过工厂模式，为当前会话生成一个挂好了专属 CostTracker 和审批 Middleware 的新引擎
+            eng = engine_factory(session, reporter)
 
-    port := ":48080"
-    log.Printf("📡 Webhook 服务已启动，正在监听端口 %s，请配置 ngrok...\n", port)
+            err = eng.run(prompt, session=session, reporter=reporter)
+            if err is not None:
+                reporter.send_msg(f”❌ Agent 运行崩溃: {err}”)
 
-    err := http.ListenAndServe(port, nil)
- if err != nil {
-        log.Fatalf("服务器启动失败: %v", err)
-    }
-}
+    bot = AgentOpsFeishuBot(work_dir=work_dir)
+
+    # 6. 启动飞书 WebSocket 长连接（替代 HTTP Webhook，无需配置 ngrok）
+    logging.info(“Webhook 服务已启动，正在通过 WebSocket 连接飞书服务器...”)
+    bot.start_websocket()
+
+
+if __name__ == “__main__”:
+    main()
 ```
 
 通过这一系列重构，我们在专栏的最后一战中，闭环了高并发调度、账单隔离追踪、状态透传和动态审批防线。
@@ -500,16 +521,12 @@ EOF
 
 ### 触发事件流
 
-启动你的 go run cmd/agentops/main.go：
+启动你的 python cmd/agentops/main.py：
 ```
-$go run cmd/agentops/main.go 
-2026/05/05 20:58:32 🚀 正在启动 go-tiny-claw AgentOps 飞书服务端...
-2026/05/05 20:58:32 [Registry] 成功挂载工具: read_file
-2026/05/05 20:58:32 [Registry] 成功挂载工具: write_file
-2026/05/05 20:58:32 [Registry] 成功挂载工具: edit_file
-2026/05/05 20:58:32 [Registry] 成功挂载工具: bash
-2026/05/05 20:58:32 🛡️ 安全防御 Middleware 已挂载。
-2026/05/05 20:58:32 📡 Webhook 服务已启动，正在监听端口 :48080...
+$ python cmd/agentops/main.py
+2026/05/05 20:58:32 [INFO] 正在启动 tiny-claw AgentOps 飞书服务端...
+2026/05/05 20:58:32 [INFO] 安全防御 Middleware 已就绪（按请求动态挂载）。
+2026/05/05 20:58:32 [INFO] Webhook 服务已启动，正在通过 WebSocket 连接飞书服务器...
 ```
 
 然后，在一个安静的夜晚，你在飞书的运维群里 @ 了我们的机器人：
@@ -602,7 +619,7 @@ $go run cmd/agentops/main.go
 
 ## 本讲小结
 
-今天，我们完成了 go-tiny-claw 整个专栏的最后一个实战演示，为这段硬核之旅画上了一个完美的句号：
+今天，我们完成了 tiny-claw 整个专栏的最后一个实战演示，为这段硬核之旅画上了一个完美的句号：
 
 AgentOps 的落地范式：将 Agent 剥离终端，以后台守护进程的形式接入企业 IM（飞书），是目前 AI 介入团队协同、自动化运维的最优解。
 

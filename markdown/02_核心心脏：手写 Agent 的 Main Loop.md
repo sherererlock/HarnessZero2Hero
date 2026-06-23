@@ -1,6 +1,6 @@
 你好，我是 Tony Bai。欢迎来到《从 0 开始构建 Agent Harness》专栏的第二讲。
 
-在上一讲中，我们完成了一次底层的认知重塑：我们不再把开发 Agent 当作是调用大模型 API 的填空题，而是把它当作是为大模型（CPU）编写一个微型操作系统（Harness / 驾驭工程）。我们确立了 go-tiny-claw 的四层架构，并搭建了基础的目录骨架和启动占位符。
+在上一讲中，我们完成了一次底层的认知重塑：我们不再把开发 Agent 当作是调用大模型 API 的填空题，而是把它当作是为大模型（CPU）编写一个微型操作系统（Harness / 驾驭工程）。我们确立了 tiny-claw 的四层架构，并搭建了基础的目录骨架和启动占位符。
 
 今天，我们要深入到核心引擎层（Core Engine Layer），去亲手实现这台操作系统的心脏起搏器——Main Loop。
 
@@ -42,7 +42,7 @@
 
 然后再回到第 1 步，结合新获得的 Observation 再次思考，形成闭环。
 
-在驾驭工程（Harness Engineering）中，我们将这套理论抽象为一个底层的 for 循环。我们可以用下面这张状态机图来精确描述它在 go-tiny-claw 中的流转过程：
+在驾驭工程（Harness Engineering）中，我们将这套理论抽象为一个底层的 for 循环。我们可以用下面这张状态机图来精确描述它在 tiny-claw 中的流转过程：
 
 ![](img/02_02.webp)
 
@@ -60,7 +60,7 @@
 
 理论铺垫完毕。接下来，我们就将这些理论转化为纯粹的代码。
 
-## 构建 go-tiny-claw 的核心心脏
+## 构建 tiny-claw 的核心心脏
 
 为了让引擎的代码易于测试且职责单一，我们需要在不同的目录下定义好几个核心的数据结构和接口。
 
@@ -68,347 +68,317 @@
 
 回顾我们在上一讲创建的目录。今天我们将丰富 schema（定义统一的血液）、provider（大脑接口）、tools（手脚接口）以及 engine（核心心脏）。
 ```
-go-tiny-claw/
+tiny-claw/
 ├── cmd/
 │   └── claw/
-│       └── main.go          # 测试入口：将挂载 Mock 组件运行 Main Loop
+│       └── main.py          # 测试入口：将挂载 Mock 组件运行 Main Loop
 ├── internal/
 │   ├── engine/              # 【核心引擎层】
-│   │   └── loop.go          # 本讲核心：Main Loop 逻辑
+│   │   └── loop.py          # 本讲核心：Main Loop 逻辑
 │   ├── provider/            # 【模型适配层】
-│   │   └── interface.go     # LLM Provider 接口定义
+│   │   └── interface.py     # LLM Provider 接口定义
 │   ├── schema/              # 【公共数据结构】
-│   │   └── message.go       # 统一的消息与工具调用类型定义
+│   │   └── message.py       # 统一的消息与工具调用类型定义
 │   └── tools/               # 【工具与执行层】
-│       └── registry.go      # 工具注册与分发接口
-├── go.mod
+│       └── registry.py      # 工具注册与分发接口
 └── README.md
 ```
 
 ### 第 1 步：定义系统的统一血液 (Schema)
 
-在 Harness 驾驭引擎中，各个组件（大模型、工具、主循环）之间传递的数据就是上下文（Context）。由于市面上不同大模型（Claude、OpenAI 模型等）的 API 格式千差万别，我们必须定义一套属于 go-tiny-claw 自己的标准数据结构，来承载 ReAct 范式中的“思考”与“行动”。
+在 Harness 驾驭引擎中，各个组件（大模型、工具、主循环）之间传递的数据就是上下文（Context）。由于市面上不同大模型（Claude、OpenAI 模型等）的 API 格式千差万别，我们必须定义一套属于 tiny-claw 自己的标准数据结构，来承载 ReAct 范式中的”思考”与”行动”。
 
-新建 internal/schema/message.go：
-```
-package schema
+新建 internal/schema/message.py：
+```python
+from enum import Enum
+from typing import List, Optional, Any
+from dataclasses import dataclass
 
-import "encoding/json"
+# Role 定义消息的角色，这是与大模型沟通的基石
+class Role(str, Enum):
+    SYSTEM = “system”       # 系统提示词：确立 Agent 的性格与红线
+    USER = “user”           # 用户输入 / 工具执行的返回结果 (Observation)
+    ASSISTANT = “assistant” # 模型的输出：包含推理(Reasoning)或工具调用(ToolCall)
 
-// Role 定义消息的角色，这是与大模型沟通的基石
-type Role string
+@dataclass
+class Message:
+    “””Message 代表上下文中传递的单条消息”””
+    role: Role
+    content: str = “”  # 存放纯文本内容
+    # 如果模型决定调用工具，此字段将被填充 (支持并行调用多个工具)
+    tool_calls: Optional[List[“ToolCall”]] = None
+    # 如果这是对某个工具调用的响应，此字段必须填写，以告知模型上下文的关联性
+    tool_call_id: Optional[str] = None
 
-const (
-    RoleSystem    Role = "system" // 系统提示词：确立 Agent 的性格与红线
-    RoleUser      Role = "user" // 用户输入 / 工具执行的返回结果 (Observation)
-    RoleAssistant Role = "assistant" // 模型的输出：包含推理(Reasoning)或工具调用(ToolCall)
-)
+@dataclass
+class ToolCall:
+    “””ToolCall 代表模型请求调用某个具体的工具”””
+    id: str         # 工具调用的唯一 ID
+    name: str       # 想要调用的工具名称 (例如 “bash”)
+    # Arguments 存放 JSON 参数。对应 Go 的 json.RawMessage，延迟解析，将解析责任交给具体的工具
+    arguments: Any
 
-// Message 代表上下文中传递的单条消息
-type Message struct {
-    Role    Role   `json:"role"`
-    Content string `json:"content"` // 存放纯文本内容
+@dataclass
+class ToolResult:
+    “””ToolResult 代表工具在本地执行完毕后返回的物理结果”””
+    tool_call_id: str
+    output: str            # 工具执行的控制台输出或报错堆栈
+    is_error: bool = False # 标记是否失败，供后续的驾驭工程进行错误自愈
 
- // 如果模型决定调用工具，此字段将被填充 (支持并行调用多个工具)
-    ToolCalls []ToolCall `json:"tool_calls,omitempty"`
-
- // 如果这是对某个工具调用的响应，此字段必须填写，以告知模型上下文的关联性
-    ToolCallID string `json:"tool_call_id,omitempty"`
-}
-
-// ToolCall 代表模型请求调用某个具体的工具
-type ToolCall struct {
-    ID        string `json:"id"` // 工具调用的唯一 ID
-    Name      string `json:"name"` // 想要调用的工具名称 (例如 "bash")
- // Arguments 存放 JSON 参数。使用 RawMessage 是为了延迟解析，将解析责任交给具体的工具
-    Arguments json.RawMessage `json:"arguments"` 
-}
-
-// ToolResult 代表工具在本地执行完毕后返回的物理结果
-type ToolResult struct {
-    ToolCallID string `json:"tool_call_id"`
-    Output     string `json:"output"` // 工具执行的控制台输出或报错堆栈
-    IsError    bool `json:"is_error"` // 标记是否失败，供后续的驾驭工程进行错误自愈
-}
-
-// ToolDefinition 描述了一个大模型可以调用的工具元信息 (供模型理解工具有什么用)
-type ToolDefinition struct {
-    Name        string `json:"name"`
-    Description string `json:"description"`
-    InputSchema interface{} `json:"input_schema"` // 对应 JSON Schema
-}
+@dataclass
+class ToolDefinition:
+    “””ToolDefinition 描述了一个大模型可以调用的工具元信息 (供模型理解工具有什么用)”””
+    name: str
+    description: str
+    input_schema: Any  # 对应 Go 的 interface{}，通常是 JSON Schema 字典
 ```
 
-这段代码确立了我们微型 OS 的通信协议。注意 ToolCall 中的 Arguments 使用了 json.RawMessage，这意味着 Main Loop 根本不关心具体的工具需要什么参数，实现了极致的解耦。
+这段代码确立了我们微型 OS 的通信协议。注意 ToolCall 中的 arguments 使用了 Python 的 Any 类型，这意味着 Main Loop 根本不关心具体的工具需要什么参数，实现了极致的解耦。
 
 ### 第 2 步：抽象 Provider 和 Tool 接口
 
 在写 for 循环之前，Engine 需要知道去哪里调用大模型，去哪里执行工具。我们通过接口（Interface）来隔离底层实现。
 
-新建 internal/provider/interface.go：
+新建 internal/provider/interface.py：
+```python
+from abc import ABC, abstractmethod
+from typing import List
+from ..schema.message import Message, ToolDefinition
+
+class LLMProvider(ABC):
+    """LLMProvider 定义了与大模型通信的统一契约"""
+
+    @abstractmethod
+    def generate(
+        self,
+        messages: List[Message],
+        available_tools: List[ToolDefinition]
+    ) -> Message:
+        """接收当前的上下文历史、可用工具列表，并发起一次大模型推理"""
+        pass
 ```
-package provider
 
-import (
- "context"
- "github.com/yourname/go-tiny-claw/internal/schema"
-)
+接着，在 internal/tools/registry.py 中定义工具注册表的接口：
+```python
+from abc import ABC, abstractmethod
+from typing import List
+from ..schema.message import ToolDefinition, ToolCall, ToolResult
 
-// LLMProvider 定义了与大模型通信的统一契约
-type LLMProvider interface {
- // Generate 接收当前的上下文历史、可用工具列表，并发起一次大模型推理
-    Generate(ctx context.Context, messages []schema.Message, availableTools []schema.ToolDefinition) (*schema.Message, error)
-}
-```
+class Registry(ABC):
+    """Registry 定义了工具的注册与分发执行接口"""
 
-接着，在 internal/tools/registry.go 中定义工具注册表的接口：
-```
-package tools
+    @abstractmethod
+    def get_available_tools(self) -> List[ToolDefinition]:
+        """返回当前系统挂载的所有可用工具的 Schema"""
+        pass
 
-import (
- "context"
- "github.com/yourname/go-tiny-claw/internal/schema"
-)
-
-// Registry 定义了工具的注册与分发执行接口
-type Registry interface {
- // GetAvailableTools 返回当前系统挂载的所有可用工具的 Schema
-    GetAvailableTools() []schema.ToolDefinition
-
- // Execute 实际执行模型请求的工具，并返回结果
-    Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult
-}
+    @abstractmethod
+    def execute(self, call: ToolCall) -> ToolResult:
+        """实际执行模型请求的工具，并返回结果"""
+        pass
 ```
 
 ### 第 3 步：实现心脏起搏器 —— Main Loop
 
-现在，所有的拼图都准备好了。让我们进入 internal/engine/loop.go，写下这台微型 OS 最核心的心跳逻辑。
-```
-package engine
+现在，所有的拼图都准备好了。让我们进入 internal/engine/loop.py，写下这台微型 OS 最核心的心跳逻辑。
+```python
+import logging
+from typing import Optional
+from ..provider.interface import LLMProvider
+from ..tools.registry import Registry
+from ..schema.message import Message, Role
 
-import (
- "context"
- "fmt"
- "log"
+class AgentEngine:
+    """AgentEngine 是微型 OS 的核心驱动"""
 
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/schema"
- "github.com/yourname/go-tiny-claw/internal/tools"
-)
+    def __init__(self, provider: LLMProvider, registry: Registry, work_dir: str):
+        self.provider = provider
+        self.registry = registry
+        # WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
+        self.work_dir = work_dir
 
-// AgentEngine 是微型 OS 的核心驱动
-type AgentEngine struct {
-    provider provider.LLMProvider
-    registry tools.Registry
+    def run(self, user_prompt: str) -> Optional[Exception]:
+        """Run 启动 Agent 的生命周期"""
+        logging.info(f"[Engine] 引擎启动，锁定工作区: {self.work_dir}")
 
- // WorkDir (工作区): 借鉴 OpenClaw 的理念，Agent 必须有一个明确的物理边界
-    WorkDir string 
-}
+        # 1. 初始化会话的 Context (上下文内存)
+        # 在真实的场景中，这里会由动态 Prompt 组装器加载 AGENTS.md。目前我们先硬编码。
+        context_history = [
+            Message(
+                role=Role.SYSTEM,
+                content="You are tiny-claw, an expert coding assistant. You have full access to tools in the workspace.",
+            ),
+            Message(
+                role=Role.USER,
+                content=user_prompt,
+            ),
+        ]
 
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string) *AgentEngine {
- return &AgentEngine{
-        provider: p,
-        registry: r,
-        WorkDir:  workDir,
-    }
-}
+        turn_count = 0
 
-// Run 启动 Agent 的生命周期
-func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
-    log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
+        # 2. The Main Loop: 心跳开始 (标准的 ReAct 循环)
+        while True:
+            turn_count += 1
+            logging.info(f"========== [Turn {turn_count}] 开始 ==========")
 
- // 1. 初始化会话的 Context (上下文内存)
- // 在真实的场景中，这里会由动态 Prompt 组装器加载 AGENTS.md。目前我们先硬编码。
-    contextHistory := []schema.Message{
-        {
-            Role:    schema.RoleSystem,
-            Content: "You are go-tiny-claw, an expert coding assistant. You have full access to tools in the workspace.",
-        },
-        {
-            Role:    schema.RoleUser,
-            Content: userPrompt,
-        },
-    }
+            # 获取当前挂载的所有工具定义
+            available_tools = self.registry.get_available_tools()
 
-    turnCount := 0
+            # 向大模型发起推理请求 (包含 Reasoning)
+            logging.info("[Engine] 正在思考 (Reasoning)...")
+            try:
+                response_msg = self.provider.generate(context_history, available_tools)
+            except Exception as e:
+                return RuntimeError(f"模型生成失败: {e}")
 
- // 2. The Main Loop: 心跳开始 (标准的 ReAct 循环)
- for {
-        turnCount++
-        log.Printf("========== [Turn %d] 开始 ==========\n", turnCount)
+            # 将模型的响应完整追加到上下文历史中
+            context_history.append(response_msg)
 
- // 获取当前挂载的所有工具定义
-        availableTools := e.registry.GetAvailableTools()
+            # 如果模型回复了纯文本，打印出来 (这通常是它的思考过程，或是最终结果)
+            if response_msg.content:
+                logging.info(f"🤖 模型: {response_msg.content}")
 
- // 向大模型发起推理请求 (包含 Reasoning)
-        log.Println("[Engine] 正在思考 (Reasoning)...")
-        responseMsg, err := e.provider.Generate(ctx, contextHistory, availableTools)
- if err != nil {
- return fmt.Errorf("模型生成失败: %w", err)
-        }
+            # 3. 退出条件判断
+            # 如果模型没有请求任何工具调用，说明它认为任务已经完成，跳出循环。
+            if not response_msg.tool_calls:
+                logging.info("[Engine] 任务完成，退出循环。")
+                break
 
- // 将模型的响应完整追加到上下文历史中
-        contextHistory = append(contextHistory, *responseMsg)
+            # 4. 执行行动 (Action) 与 获取观察结果 (Observation)
+            logging.info(f"[Engine] 模型请求调用 {len(response_msg.tool_calls)} 个工具...")
 
- // 如果模型回复了纯文本，打印出来 (这通常是它的思考过程，或是最终结果)
- if responseMsg.Content != "" {
-            fmt.Printf("🤖 模型: %s\n", responseMsg.Content)
-        }
+            for tool_call in response_msg.tool_calls:
+                logging.info(f"  -> 🛠️ 执行工具: {tool_call.name}, 参数: {tool_call.arguments}")
 
- // 3. 退出条件判断
- // 如果模型没有请求任何工具调用，说明它认为任务已经完成，跳出循环。
- if len(responseMsg.ToolCalls) == 0 {
-            log.Println("[Engine] 任务完成，退出循环。")
- break
-        }
+                # 通过 Registry 路由并执行底层工具
+                result = self.registry.execute(tool_call)
 
- // 4. 执行行动 (Action) 与 获取观察结果 (Observation)
-        log.Printf("[Engine] 模型请求调用 %d 个工具...\n", len(responseMsg.ToolCalls))
+                if result.is_error:
+                    logging.error(f"  -> ❌ 工具执行报错: {result.output}")
+                else:
+                    logging.info(f"  -> ✅ 工具执行成功 (返回 {len(result.output)} 字节)")
 
- for _, toolCall := range responseMsg.ToolCalls {
-            log.Printf("  -> 🛠️ 执行工具: %s, 参数: %s\n", toolCall.Name, string(toolCall.Arguments))
+                # 将工具执行的观察结果 (Observation) 封装为 User Message 追加到上下文中
+                # 注意：tool_call_id 必须携带！这是维系大模型推理链条的关键
+                observation_msg = Message(
+                    role=Role.USER,
+                    content=result.output,
+                    tool_call_id=tool_call.id,
+                )
+                context_history.append(observation_msg)
 
- // 通过 Registry 路由并执行底层工具
-            result := e.registry.Execute(ctx, toolCall)
+            # 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
 
- if result.IsError {
-                log.Printf("  -> ❌ 工具执行报错: %s\n", result.Output)
-            } else {
-                log.Printf("  -> ✅ 工具执行成功 (返回 %d 字节)\n", len(result.Output))
-            }
-
- // 将工具执行的观察结果 (Observation) 封装为 User Message 追加到上下文中
- // 注意：ToolCallID 必须携带！这是维系大模型推理链条的关键
-            observationMsg := schema.Message{
-                Role:       schema.RoleUser,
-                Content:    result.Output,
-                ToolCallID: toolCall.ID, 
-            }
-            contextHistory = append(contextHistory, observationMsg)
-        }
-
- // 循环回到开头，模型将带着新加入的 Observation 继续它的下一轮思考...
-    }
-
- return nil
-}
+        return None
 ```
 
 看这段代码，你会惊叹于驾驭工程的极简之美。
 
-loop.go 根本不关心 bash 工具是怎么运行的，也不关心 Claude 模型的 HTTP 请求怎么发。
+loop.py 根本不关心 bash 工具是怎么运行的，也不关心 Claude 模型的 HTTP 请求怎么发。
 
 它只负责维护这根脆弱但重要的“上下文时间线”（contextHistory）。它像一个忠实的书记员，严格执行了 ReAct 范式：把模型的意图（ToolCall）交给执行层，再把物理世界的反馈（Observation）原封不动地追加回内存中。
 
 ## 运行与验证：连接 Mock 桩代码
 
-为了让你能在本地把这个空心引擎跑起来，验证我们的 Main Loop 是否健壮，我们在 main.go 中快速写两个“假肢（Mock）”实现。
+为了让你能在本地把这个空心引擎跑起来，验证我们的 Main Loop 是否健壮，我们在 main.py 中快速写两个”假肢（Mock）”实现。
 
-打开 cmd/claw/main.go：
-```
-package main
+打开 cmd/claw/main.py：
+```python
+import os
+import logging
+from internal.engine.loop import AgentEngine
+from internal.provider.interface import LLMProvider
+from internal.schema.message import Message, Role, ToolCall, ToolResult, ToolDefinition
+from internal.tools.registry import Registry
+from typing import List
 
-import (
- "context"
- "log"
- "os"
+# ==========================================
+# 1. 伪造的大模型 Provider
+# ==========================================
+class MockProvider(LLMProvider):
+    def __init__(self):
+        self.turn = 0
 
- "github.com/yourname/go-tiny-claw/internal/engine"
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/schema"
- "github.com/yourname/go-tiny-claw/internal/tools"
-)
+    # 模拟大模型的响应：第一轮请求执行 bash，第二轮输出最终结果
+    def generate(self, messages: List[Message], available_tools: List[ToolDefinition]) -> Message:
+        self.turn += 1
+        if self.turn == 1:
+            return Message(
+                role=Role.ASSISTANT,
+                content="让我来看看当前目录下有什么文件。",
+                tool_calls=[
+                    ToolCall(id="call_123", name="bash", arguments={"command": "ls -la"}),
+                ],
+            )
 
-// ==========================================
-// 1. 伪造的大模型 Provider
-// ==========================================
-type mockProvider struct {
-    turn int
-}
+        return Message(
+            role=Role.ASSISTANT,
+            content="我看到了文件列表，里面包含 main.py，任务完成！",
+        )
 
-// 模拟大模型的响应：第一轮请求执行 bash，第二轮输出最终结果
-func (m *mockProvider) Generate(ctx context.Context, msgs []schema.Message, _ []schema.ToolDefinition) (*schema.Message, error) {
-    m.turn++
- if m.turn == 1 {
- return &schema.Message{
-            Role:    schema.RoleAssistant,
-            Content: "让我来看看当前目录下有什么文件。",
-            ToolCalls: []schema.ToolCall{
-                {ID: "call_123", Name: "bash", Arguments: []byte(`{"command": "ls -la"}`)},
-            },
-        }, nil
-    }
+# ==========================================
+# 2. 伪造的 Tool Registry
+# ==========================================
+class MockRegistry(Registry):
+    def get_available_tools(self) -> List[ToolDefinition]:
+        return []
 
- return &schema.Message{
-        Role:    schema.RoleAssistant,
-        Content: "我看到了文件列表，里面包含 main.go，任务完成！",
-    }, nil
-}
+    def execute(self, call: ToolCall) -> ToolResult:
+        # 直接返回一段伪造的终端输出
+        return ToolResult(
+            tool_call_id=call.id,
+            output="-rw-r--r--  1 user group  234 Oct 24 10:00 main.py\n",
+            is_error=False,
+        )
 
-// ==========================================
-// 2. 伪造的 Tool Registry
-// ==========================================
-type mockRegistry struct{}
+# ==========================================
+# 3. 组装运行
+# ==========================================
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
 
-func (m *mockRegistry) GetAvailableTools() []schema.ToolDefinition { return nil }
+    # 获取当前执行目录作为 WorkDir 物理边界
+    work_dir = os.getcwd()
 
-func (m *mockRegistry) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
- // 直接返回一段伪造的终端输出
- return schema.ToolResult{
-        ToolCallID: call.ID,
-        Output:     "-rw-r--r--  1 user group  234 Oct 24 10:00 main.go\n",
-        IsError:    false,
-    }
-}
+    p = MockProvider()
+    r = MockRegistry()
 
-// ==========================================
-// 3. 组装运行
-// ==========================================
-func main() {
- // 获取当前执行目录作为 WorkDir 物理边界
-    workDir, _ := os.Getwd()
+    # 实例化核心引擎
+    eng = AgentEngine(p, r, work_dir)
 
-    p := &mockProvider{}
-    r := &mockRegistry{}
-
- // 实例化核心引擎
-    eng := engine.NewAgentEngine(p, r, workDir)
-
- // 发起任务指令
-    err := eng.Run(context.Background(), "帮我检查当前目录的文件")
- if err != nil {
-        log.Fatalf("引擎崩溃: %v", err)
-    }
-}
+    # 发起任务指令
+    err = eng.run("帮我检查当前目录的文件")
+    if err:
+        logging.error(f"引擎崩溃: {err}")
 ```
 
 ### 运行步骤与预期输出
 
 在终端中执行启动命令：
-```
-go run cmd/claw/main.go
+```bash
+python cmd/claw/main.py
 ```
 
 你将清晰地看到 Main Loop 在终端中完美地驱动了两个 Turn 的循环：
 ```
-2026/03/29 17:12:13 [Engine] 引擎启动，锁定工作区: build-agent-harness-from-scratch/part1/source/ch02/go-tiny-claw
-2026/03/29 17:12:13 ========== [Turn 1] 开始 ==========
-2026/03/29 17:12:13 [Engine] 正在思考 (Reasoning)...
-🤖 模型: 让我来看看当前目录下有什么文件。
-2026/03/29 17:12:13 [Engine] 模型请求调用 1 个工具...
-2026/03/29 17:12:13   -> 🛠️ 执行工具: bash, 参数: {"command": "ls -la"}
-2026/03/29 17:12:13   -> ✅ 工具执行成功 (返回 51 字节)
-2026/03/29 17:12:13 ========== [Turn 2] 开始 ==========
-2026/03/29 17:12:13 [Engine] 正在思考 (Reasoning)...
-🤖 模型: 我看到了文件列表，里面包含 main.go，任务完成！
-2026/03/29 17:12:13 [Engine] 任务完成，退出循环。
+INFO:root:[Engine] 引擎启动，锁定工作区: /path/to/tiny-claw
+INFO:root:========== [Turn 1] 开始 ==========
+INFO:root:[Engine] 正在思考 (Reasoning)...
+INFO:root:🤖 模型: 让我来看看当前目录下有什么文件。
+INFO:root:[Engine] 模型请求调用 1 个工具...
+INFO:root:  -> 🛠️ 执行工具: bash, 参数: {'command': 'ls -la'}
+INFO:root:  -> ✅ 工具执行成功 (返回 51 字节)
+INFO:root:========== [Turn 2] 开始 ==========
+INFO:root:[Engine] 正在思考 (Reasoning)...
+INFO:root:🤖 模型: 我看到了文件列表，里面包含 main.py，任务完成！
+INFO:root:[Engine] 任务完成，退出循环。
 ```
 
 至此，虽然我们接入的还是“假肢”，但这个基于 ReAct 范式的微型操作系统“心脏”，已经确确实实、稳定地跳动起来了！
 
 ## 本讲小结
 
-今天，我们完成了 go-tiny-claw 核心引擎层（Core Engine Layer）的构建。
+今天，我们完成了 tiny-claw 核心引擎层（Core Engine Layer）的构建。
 
 解构 ReAct 模型：我们追溯了 AI Agent 的学术演进，将复杂的任务流转抽象为了一个极简的“思考（Reason）- 行动（Act）- 观察（Observe）”无限循环。只要大模型吐出工具请求，我们就执行并追加结果；只要它输出纯文本，我们就视为任务结束。
 
@@ -424,16 +394,15 @@ go run cmd/claw/main.go
 
 ## 思考题
 
-仔细观察目前的 loop.go 代码，当大模型在一个 Turn 里返回了多个 ToolCall 时，我们是通过一个 for 循环串行（Sequential）地去调用 e.registry.Execute 的：
-```
-for _, toolCall := range responseMsg.ToolCalls {
-    result := e.registry.Execute(ctx, toolCall)
- // ...
-}
+仔细观察目前的 loop.py 代码，当大模型在一个 Turn 里返回了多个 ToolCall 时，我们是通过一个 for 循环串行（Sequential）地去调用 self.registry.execute 的：
+```python
+for tool_call in response_msg.tool_calls:
+    result = self.registry.execute(tool_call)
+    # ...
 ```
 
 假设大模型非常聪明，它为了加快速度，同时请求了读取 3 个完全独立的文件。以我们目前的串行写法，必须等第一个文件读完并返回，才会去读第二个文件。
 
-作为一名专业的 Go 开发工程师，你能想到如何利用 Go 语言的原生特性（比如 Goroutine 和 WaitGroup），将这里的工具执行改造为并行执行（Parallel Execution）吗？如果在并行执行中某个工具报错了，又该如何将所有并行的结果（Observation）按照正确的顺序组装回 Context 中？
+作为一名专业的 Python 开发工程师，你能想到如何利用 Python 的原生特性（比如 concurrent.futures.ThreadPoolExecutor），将这里的工具执行改造为并行执行（Parallel Execution）吗？如果在并行执行中某个工具报错了，又该如何将所有并行的结果（Observation）按照正确的顺序组装回 Context 中？
 
 欢迎在留言区分享你的代码思路。我们将在本专栏的第 08 讲中为你揭晓工业级的并行标准答案。下一讲见！

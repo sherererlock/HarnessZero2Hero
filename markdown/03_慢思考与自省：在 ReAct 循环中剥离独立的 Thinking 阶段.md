@@ -1,6 +1,6 @@
 你好，我是 Tony Bai。欢迎来到《从 0 开始构建 Agent Harness》专栏的第三讲。
 
-在上一讲中，我们从学术界的 ReAct 论文出发，用 Go 语言手写了 go-tiny-claw 的心脏——Main Loop。我们成功地让一个“假肢”模型在“思考 - 行动 - 观察”的无尽循环中跑了起来。
+在上一讲中，我们从学术界的 ReAct 论文出发，用 Python 手写了 tiny-claw 的心脏——Main Loop。我们成功地让一个“假肢”模型在“思考 - 行动 - 观察”的无尽循环中跑了起来。
 
 看似我们已经掌握了智能体运行的终极密码。但是，如果现在就把真实的前沿大模型（如 Claude 4.x 或 GPT-5.x）接入这个基础循环，并且给它挂载上能够修改本地代码的 edit 和 bash 工具，你会遭遇一个极其普遍但又令人抓狂的现象：大模型变得极其“冲动”。
 
@@ -50,268 +50,245 @@
 
 ## 代码实战：在 Main Loop 中剥离 Thinking 阶段
 
-理解了理论，落实到 Go 语言的代码层面其实非常简单。
+理解了理论，落实到 Python 的代码层面其实非常简单。
 
-得益于我们在上一讲中设计的 LLMProvider 接口极其纯粹（Generate(ctx, msgs, tools)），我们只需要在传参时动一点手脚：如果不传 tools 数组，大模型自然就只能输出文本了。
+得益于我们在上一讲中设计的 LLMProvider 类极其纯粹（generate(msgs, available_tools)），我们只需要在传参时动一点手脚：如果不传 tools 数组，大模型自然就只能输出文本了。
 
 ### 目录结构回顾与更新
 
-我们今天的核心修改全部集中在 internal/engine/loop.go 和测试入口 cmd/claw/main.go 中。
+我们今天的核心修改全部集中在 internal/engine/loop.py 和测试入口 cmd/claw/main.py 中。
 ```
-go-tiny-claw/
+tiny-claw/
 ├── cmd/
 │   └── claw/
-│       └── main.go          # 【修改】升级 Mock Provider，支持区分推理和行动请求
+│       └── main.py          # 【修改】升级 Mock Provider，支持区分推理和行动请求
 ├── internal/
 │   ├── engine/
-│   │   └── loop.go          # 【核心修改】引入 EnableThinking 开关，重构为两阶段循环
+│   │   └── loop.py          # 【核心修改】引入 EnableThinking 开关，重构为两阶段循环
 │   ├── provider/
-│   │   └── interface.go     # 保持不变
+│   │   └── interface.py     # 保持不变
 │   ├── schema/
-│   │   └── message.go       # 保持不变
+│   │   └── message.py       # 保持不变
 │   └── tools/
-│       └── registry.go      # 保持不变
-├── go.mod
+│       └── registry.py      # 保持不变
 └── README.md
 ```
 
 ### 第 1 步：改造 AgentEngine，增加思维开关
 
-打开 internal/engine/loop.go，我们为引擎增加一个 EnableThinking 的配置项。在处理简单任务（比如只问个天气）时，我们可以关闭它以节省 Token；但在处理复杂代码任务时，我们将其打开。
-```
-// internal/engine/loop.go
-package engine
+打开 internal/engine/loop.py，我们为引擎增加一个 enable_thinking 的配置项。在处理简单任务（比如只问个天气）时，我们可以关闭它以节省 Token；但在处理复杂代码任务时，我们将其打开。
+```python
+# internal/engine/loop.py
+import logging
+from typing import List
 
-import (
- "context"
- "fmt"
- "log"
+from internal.provider.interface import LLMProvider
+from internal.schema.message import Message, Role, ToolCall, ToolResult, ToolDefinition
+from internal.tools.registry import Registry
 
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/schema"
- "github.com/yourname/go-tiny-claw/internal/tools"
-)
+logger = logging.getLogger(__name__)
 
-type AgentEngine struct {
-    provider       provider.LLMProvider
-    registry       tools.Registry
-    WorkDir        string
-    EnableThinking bool // 【新增】慢思考模式开关
-}
 
-func NewAgentEngine(p provider.LLMProvider, r tools.Registry, workDir string, enableThinking bool) *AgentEngine {
- return &AgentEngine{
-        provider:       p,
-        registry:       r,
-        WorkDir:        workDir,
-        EnableThinking: enableThinking,
-    }
-}
+class AgentEngine:
+    """Agent 引擎，实现两阶段 ReAct 循环。"""
+
+    def __init__(
+        self,
+        provider: LLMProvider,
+        registry: Registry,
+        work_dir: str,
+        enable_thinking: bool,  # 【新增】慢思考模式开关
+    ) -> None:
+        self.provider = provider
+        self.registry = registry
+        self.work_dir = work_dir
+        self.enable_thinking = enable_thinking
 ```
 
 ### 第 2 步：重构 Main Loop，实现两阶段流转
 
-接下来，我们修改 Run 方法。在原来的向大模型发起请求的地方，将其拆分为明显的两步：Phase 1（Thinking）和 Phase 2（Action）。
-```
-// internal/engine/loop.go (续)
+接下来，我们修改 run 方法。在原来的向大模型发起请求的地方，将其拆分为明显的两步：Phase 1（Thinking）和 Phase 2（Action）。
+```python
+    # internal/engine/loop.py (续)
 
-func (e *AgentEngine) Run(ctx context.Context, userPrompt string) error {
-    log.Printf("[Engine] 引擎启动，锁定工作区: %s\n", e.WorkDir)
-    log.Printf("[Engine] 慢思考模式 (Thinking Phase): %v\n", e.EnableThinking)
+    def run(self, user_prompt: str) -> None:
+        logger.info(f"[Engine] 引擎启动，锁定工作区: {self.work_dir}")
+        logger.info(f"[Engine] 慢思考模式 (Thinking Phase): {self.enable_thinking}")
 
-    contextHistory := []schema.Message{
-        {
-            Role:    schema.RoleSystem,
-            Content: "You are go-tiny-claw, an expert coding assistant. You have full access to tools in the workspace.",
-        },
-        {
-            Role:    schema.RoleUser,
-            Content: userPrompt,
-        },
-    }
+        context_history: List[Message] = [
+            Message(
+                role=Role.SYSTEM,
+                content="You are tiny-claw, an expert coding assistant. You have full access to tools in the workspace.",
+            ),
+            Message(
+                role=Role.USER,
+                content=user_prompt,
+            ),
+        ]
 
-    turnCount := 0
+        turn_count = 0
 
- for {
-        turnCount++
-        log.Printf("\n========== [Turn %d] 开始 ==========\n", turnCount)
+        while True:
+            turn_count += 1
+            logger.info(f"\n========== [Turn {turn_count}] 开始 ==========")
 
- // 获取当前挂载的所有工具定义
-        availableTools := e.registry.GetAvailableTools()
+            # 获取当前挂载的所有工具定义
+            available_tools = self.registry.get_available_tools()
 
- // ====================================================================
- // Phase 1: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
- // ====================================================================
- if e.EnableThinking {
-            log.Println("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...")
+            # ====================================================================
+            # Phase 1: 慢思考阶段 (Thinking) - 剥夺工具，强制规划
+            # ====================================================================
+            if self.enable_thinking:
+                logger.info("[Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...")
 
- // 核心机制：传入的 availableTools 为 nil！
- // 大模型看不到任何 JSON Schema，被迫只能输出纯文本的思考过程。
-            thinkResp, err := e.provider.Generate(ctx, contextHistory, nil)
- if err != nil {
- return fmt.Errorf("Thinking 阶段生成失败: %w", err)
-            }
+                # 核心机制：传入的 available_tools 为 None！
+                # 大模型看不到任何 JSON Schema，被迫只能输出纯文本的思考过程。
+                think_resp = self.provider.generate(context_history, None)
 
- // 如果模型输出了思考过程，我们将其作为 Assistant 消息追加到上下文中
- if thinkResp.Content != "" {
-                fmt.Printf("🧠 [内部思考 Trace]: %s\n", thinkResp.Content)
-                contextHistory = append(contextHistory, *thinkResp)
-            }
-        }
+                # 如果模型输出了思考过程，我们将其作为 Assistant 消息追加到上下文中
+                if think_resp.content:
+                    print(f"🧠 [内部思考 Trace]: {think_resp.content}")
+                    context_history.append(think_resp)
 
- // ====================================================================
- // Phase 2: 行动阶段 (Action) - 恢复工具，顺着规划执行
- // ====================================================================
-        log.Println("[Engine][Phase 2] 恢复工具挂载，等待模型采取行动...")
+            # ====================================================================
+            # Phase 2: 行动阶段 (Action) - 恢复工具，顺着规划执行
+            # ====================================================================
+            logger.info("[Engine][Phase 2] 恢复工具挂载，等待模型采取行动...")
 
- // 此时的 contextHistory 中已经包含了上一阶段模型自己的 Thinking Trace。
- // 模型会顺着自己的逻辑，结合恢复的 availableTools 发起精准的工具调用。
-        actionResp, err := e.provider.Generate(ctx, contextHistory, availableTools)
- if err != nil {
- return fmt.Errorf("Action 阶段生成失败: %w", err)
-        }
+            # 此时的 context_history 中已经包含了上一阶段模型自己的 Thinking Trace。
+            # 模型会顺着自己的逻辑，结合恢复的 available_tools 发起精准的工具调用。
+            action_resp = self.provider.generate(context_history, available_tools)
 
-        contextHistory = append(contextHistory, *actionResp)
+            context_history.append(action_resp)
 
- if actionResp.Content != "" {
-            fmt.Printf("🤖 [对外回复]: %s\n", actionResp.Content)
-        }
+            if action_resp.content:
+                print(f"🤖 [对外回复]: {action_resp.content}")
 
- // ====================================================================
- // 退出与执行逻辑 (与上一讲保持一致)
- // ====================================================================
- if len(actionResp.ToolCalls) == 0 {
-            log.Println("[Engine] 模型未请求调用工具，任务宣告完成。")
- break
-        }
+            # ====================================================================
+            # 退出与执行逻辑 (与上一讲保持一致)
+            # ====================================================================
+            if not action_resp.tool_calls:
+                logger.info("[Engine] 模型未请求调用工具，任务宣告完成。")
+                break
 
-        log.Printf("[Engine] 模型请求调用 %d 个工具...\n", len(actionResp.ToolCalls))
+            logger.info(f"[Engine] 模型请求调用 {len(action_resp.tool_calls)} 个工具...")
 
- for _, toolCall := range actionResp.ToolCalls {
-            log.Printf("  -> 🛠️ 执行工具: %s, 参数: %s\n", toolCall.Name, string(toolCall.Arguments))
+            for tool_call in action_resp.tool_calls:
+                logger.info(f"  -> 🛠️ 执行工具: {tool_call.name}, 参数: {tool_call.arguments}")
 
-            result := e.registry.Execute(ctx, toolCall)
+                result = self.registry.execute(tool_call)
 
- if result.IsError {
-                log.Printf("  -> ❌ 工具执行报错: %s\n", result.Output)
-            } else {
-                log.Printf("  -> ✅ 工具执行成功 (返回 %d 字节)\n", len(result.Output))
-            }
+                if result.is_error:
+                    logger.info(f"  -> ❌ 工具执行报错: {result.output}")
+                else:
+                    logger.info(f"  -> ✅ 工具执行成功 (返回 {len(result.output)} 字节)")
 
- // 将工具执行的观察结果追加到 Context，准备进入下一轮
-            observationMsg := schema.Message{
-                Role:       schema.RoleUser,
-                Content:    result.Output,
-                ToolCallID: toolCall.ID,
-            }
-            contextHistory = append(contextHistory, observationMsg)
-        }
-    }
-
- return nil
-}
+                # 将工具执行的观察结果追加到 Context，准备进入下一轮
+                observation_msg = Message(
+                    role=Role.USER,
+                    content=result.output,
+                    tool_call_id=tool_call.id,
+                )
+                context_history.append(observation_msg)
 ```
 
-请注意看 Phase 1 中的 e.provider.Generate(ctx, contextHistory, nil)。这个 nil 就是驾驭工程中四两拨千斤的魔法。
+请注意看 Phase 1 中的 self.provider.generate(context_history, None)。这个 None 就是驾驭工程中四两拨千斤的魔法。
 
-由于大模型是自回归（Auto-regressive）的，当它在 Phase 1 自己输出了“我应该先用 bash 看看系统日志”这句话并被存入 contextHistory 后，在 Phase 2 时，它自己看到自己说的话，就会顺理成章、毫无幻觉地生成一个调用 bash 的 JSON。这极大降低了模型瞎调工具的概率。
+由于大模型是自回归（Auto-regressive）的，当它在 Phase 1 自己输出了”我应该先用 bash 看看系统日志”这句话并被存入 context_history 后，在 Phase 2 时，它自己看到自己说的话，就会顺理成章、毫无幻觉地生成一个调用 bash 的 JSON。这极大降低了模型瞎调工具的概率。
 
 ## 运行与验证：升级 Mock Provider
 
-为了验证这个两阶段架构，我们需要升级一下 cmd/claw/main.go 中的 mockProvider。
+为了验证这个两阶段架构，我们需要升级一下 cmd/claw/main.py 中的 MockProvider。
 
-我们要让这个“假肢”变得智能一点：当它发现 availableTools == nil 时，它必须假装在进行慢思考；当它发现传入了工具时，它才返回 ToolCall。
+我们要让这个“假肢”变得智能一点：当它发现 available_tools 为 None 时，它必须假装在进行慢思考；当它发现传入了工具时，它才返回 ToolCall。
 
-打开 cmd/claw/main.go：
-```
-package main
+打开 cmd/claw/main.py：
+```python
+# cmd/claw/main.py
+import logging
+import os
+from typing import List, Optional
 
-import (
- "context"
- "log"
- "os"
+from internal.engine.loop import AgentEngine
+from internal.schema.message import Message, Role, ToolCall, ToolResult, ToolDefinition
 
- "github.com/yourname/go-tiny-claw/internal/engine"
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/schema"
- "github.com/yourname/go-tiny-claw/internal/tools"
-)
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s")
+logger = logging.getLogger(__name__)
 
-// 升级版 Mock Provider
-type mockProvider struct {
-    turn int
-}
 
-func (m *mockProvider) Generate(ctx context.Context, msgs []schema.Message, tools []schema.ToolDefinition) (*schema.Message, error) {
- // 如果工具列表为空，说明这是引擎发起的 Phase 1: Thinking 阶段
- if len(tools) == 0 {
- return &schema.Message{
-            Role:    schema.RoleAssistant,
-            Content: "【推理中】目标是检查文件。我不能直接盲猜，我需要先调用 bash 工具执行 ls 命令，看看当前目录下有什么，然后再做定夺。",
-        }, nil
-    }
+# 升级版 Mock Provider
+class MockProvider:
+    """模拟 LLM Provider，用于验证两阶段 ReAct 循环。"""
 
- // 如果工具列表不为空，说明这是 Phase 2: Action 阶段
-    m.turn++
- if m.turn == 1 {
- // 第一轮 Action：顺着刚才的 Thinking，精准调用工具
- return &schema.Message{
-            Role:    schema.RoleAssistant,
-            Content: "我要执行我刚才计划的步骤了。",
-            ToolCalls: []schema.ToolCall{
-                {ID: "call_123", Name: "bash", Arguments: []byte(`{"command": "ls -la"}`)},
-            },
-        }, nil
-    }
+    def __init__(self) -> None:
+        self.turn: int = 0
 
- // 第二轮 Action：直接总结退出
- return &schema.Message{
-        Role:    schema.RoleAssistant,
-        Content: "根据工具返回的结果，我看到了 main.go，任务圆满完成！",
-    }, nil
-}
+    def generate(
+        self, msgs: List[Message], available_tools: Optional[List[ToolDefinition]] = None
+    ) -> Message:
+        # 如果工具列表为空，说明这是引擎发起的 Phase 1: Thinking 阶段
+        if not available_tools:
+            return Message(
+                role=Role.ASSISTANT,
+                content="【推理中】目标是检查文件。我不能直接盲猜，我需要先调用 bash 工具执行 ls 命令，看看当前目录下有什么，然后再做定夺。",
+            )
 
-type mockRegistry struct{}
+        # 如果工具列表不为空，说明这是 Phase 2: Action 阶段
+        self.turn += 1
+        if self.turn == 1:
+            # 第一轮 Action：顺着刚才的 Thinking，精准调用工具
+            return Message(
+                role=Role.ASSISTANT,
+                content="我要执行我刚才计划的步骤了。",
+                tool_calls=[
+                    ToolCall(id="call_123", name="bash", arguments={"command": "ls -la"}),
+                ],
+            )
 
-func (m *mockRegistry) GetAvailableTools() []schema.ToolDefinition { 
- // 为了让 Phase 2 能检测到工具，这里返回一个伪造的工具定义数组
- return []schema.ToolDefinition{{Name: "bash"}} 
-}
+        # 第二轮 Action：直接总结退出
+        return Message(
+            role=Role.ASSISTANT,
+            content="根据工具返回的结果，我看到了 main.py，任务圆满完成！",
+        )
 
-func (m *mockRegistry) Execute(ctx context.Context, call schema.ToolCall) schema.ToolResult {
- return schema.ToolResult{
-        ToolCallID: call.ID,
-        Output:     "-rw-r--r--  1 user group  234 Oct 24 10:00 main.go\n",
-        IsError:    false,
-    }
-}
 
-func main() {
-    workDir, _ := os.Getwd()
+class MockRegistry:
+    """模拟工具注册表，用于验证两阶段 ReAct 循环。"""
 
-    p := &mockProvider{}
-    r := &mockRegistry{}
+    def get_available_tools(self) -> List[ToolDefinition]:
+        # 为了让 Phase 2 能检测到工具，这里返回一个伪造的工具定义数组
+        return [ToolDefinition(name="bash", description="执行 bash 命令", input_schema={})]
 
- // 实例化引擎，开启 EnableThinking = true
-    eng := engine.NewAgentEngine(p, r, workDir, true)
+    def execute(self, call: ToolCall) -> ToolResult:
+        return ToolResult(
+            tool_call_id=call.id,
+            output="-rw-r--r--  1 user group  234 Oct 24 10:00 main.py\n",
+            is_error=False,
+        )
 
-    err := eng.Run(context.Background(), "帮我检查当前目录的文件")
- if err != nil {
-        log.Fatalf("引擎崩溃: %v", err)
-    }
-}
+
+if __name__ == "__main__":
+    work_dir = os.getcwd()
+
+    p = MockProvider()
+    r = MockRegistry()
+
+    # 实例化引擎，开启 enable_thinking = True
+    eng = AgentEngine(p, r, work_dir, enable_thinking=True)
+
+    eng.run("帮我检查当前目录的文件")
 ```
 
 ### 运行步骤与预期输出
 
 在终端中执行启动命令：
 ```
-go run cmd/claw/main.go
+python cmd/claw/main.py
 ```
 
 你将看到如下极具层次感的执行日志：
 ```
-2026/03/29 14:37:57 [Engine] 引擎启动，锁定工作区: build-agent-harness-from-scratch/part1/source/ch03/go-tiny-claw
+2026/03/29 14:37:57 [Engine] 引擎启动，锁定工作区: build-agent-harness-from-scratch/part1/source/ch03/tiny-claw
 2026/03/29 14:37:57 [Engine] 慢思考模式 (Thinking Phase): true
 2026/03/29 14:37:57 
 ========== [Turn 1] 开始 ==========
@@ -327,7 +304,7 @@ go run cmd/claw/main.go
 2026/03/29 14:37:57 [Engine][Phase 1] 剥夺工具访问权，强制进入慢思考与规划阶段...
 🧠 [内部思考 Trace]: 【推理中】目标是检查文件。我不能直接盲猜，我需要先调用 bash 工具执行 ls 命令，看看当前目录下有什么，然后再做定夺。
 2026/03/29 14:37:57 [Engine][Phase 2] 恢复工具挂载，等待模型采取行动...
-🤖 [对外回复]: 根据工具返回的结果，我看到了 main.go，任务圆满完成！
+🤖 [对外回复]: 根据工具返回的结果，我看到了 main.py，任务圆满完成！
 2026/03/29 14:37:57 [Engine] 模型未请求调用工具，任务宣告完成。
 ```
 
@@ -337,7 +314,7 @@ go run cmd/claw/main.go
 
 ### 反思：静态慢思考的局限性
 
-细心的同学可能已经发现，我们目前在 AgentEngine 中引入的 EnableThinking 是一个静态的全局开关。
+细心的同学可能已经发现，我们目前在 AgentEngine 中引入的 enable_thinking 是一个静态的全局开关。
 
 只要在启动时传了 true，大模型在未来的几十轮（Turn）交互中，每一轮都必须先被关进“小黑屋”强制做一次纯文本的推理与规划（Phase 1），然后再去执行动作（Phase 2）。
 
@@ -355,17 +332,17 @@ go run cmd/claw/main.go
 
 两阶段 ReAct（Two-Stage ReAct）：借鉴业界顶级框架的实践，我们在代码层面上强制将 Thinking 和 Action 物理拆分。
 
-驾驭工程的四两拨千斤：在具体实现时，我们通过在第一次调用 Provider 时传入 availableTools = nil，极其优雅地“逼迫”大模型输出纯文本的思考轨迹（Thinking Trace），并将其固化为接下来的上下文，利用其自回归特性引导精准的行动。
+驾驭工程的四两拨千斤：在具体实现时，我们通过在第一次调用 Provider 时传入 available_tools = None，极其优雅地“逼迫”大模型输出纯文本的思考轨迹（Thinking Trace），并将其固化为接下来的上下文，利用其自回归特性引导精准的行动。
 
 现在，这台引擎不仅有强健的心跳，更拥有了深邃的思考能力。但是，一直依赖 Mock 的假肢是没有成就感的。
 
-在下一讲中，我们将正式拔掉这个 mockProvider，通过抽象的适配层，全面接入官方的 Claude 大模型和 OpenAI 兼容的国内大模型。届时，我们将用真实的 AI 大脑，来检验这套两阶段引擎在面对真实环境时的澎湃算力！
+在下一讲中，我们将正式拔掉这个 MockProvider，通过抽象的适配层，全面接入官方的 Claude 大模型和 OpenAI 兼容的国内大模型。届时，我们将用真实的 AI 大脑，来检验这套两阶段引擎在面对真实环境时的澎湃算力！
 
 注：本讲的示例代码，可以在这里下载。
 
 ## 思考题
 
-在当前的实现中，我们在 Phase 1（Thinking）得到的 thinkResp 被作为一条普通的 schema.RoleAssistant 消息追加到了上下文中。
+在当前的实现中，我们在 Phase 1（Thinking）得到的 think_resp 被作为一条普通的 Role.ASSISTANT 消息追加到了上下文中。
 
 但在真实的工业级大模型调用中，这不仅会消耗不菲的 Token，还会暴露模型内部极其冗长的“自言自语”给终端用户（在某些产品设计中，我们希望对用户隐藏这些内部 Trace）。
 

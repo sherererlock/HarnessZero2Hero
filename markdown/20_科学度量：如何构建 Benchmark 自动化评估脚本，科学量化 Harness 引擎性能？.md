@@ -1,12 +1,12 @@
 你好，我是 Tony Bai。欢迎来到《从 0 开始构建 Agent Harness》专栏的第二十讲。
 
-在过去的 19 讲中，我们为 go-tiny-claw 打造了完善的基础设施。它能慢思考、能防内存溢出、能挂起审批，甚至在上一讲，我们还为它装上了“X 光机”，让你能看到它每一步运转的 Token 与耗时。
+在过去的 19 讲中，我们为 tiny-claw 打造了完善的基础设施。它能慢思考、能防内存溢出、能挂起审批，甚至在上一讲，我们还为它装上了”X 光机”，让你能看到它每一步运转的 Token 与耗时。
 
 但是，作为一名严谨的架构师，你肯定会面临这样一个极其现实的考验：当你把 Compactor (上下文压缩器) 的阈值从 20000 字符调整到了 10000 字符；或者你在 AGENTS.md 里新加了一条“务必写单元测试”的规矩。你如何向老板证明，你的这些改动让 Agent 变“聪明”了，而不是变“笨”了？
 
 在传统的 Web 开发中，我们有 QPS、延迟和单元测试来衡量代码的质量与执行性能。但在充满概率与黑盒的 AI Agent 开发中，如果你只能靠“每次改完代码，去终端里跟它聊几句，看看感觉还行”这种玄学方式来测试，你的引擎永远无法走向工业级应用。
 
-这就是顶级驾驭工程与其他开源玩具的最核心区别：建立可被科学量化的自动评估体系（Benchmark & Evaluation）。今天，我们将通过纯 Go 语言，构建一个极其硬核但又极其简单的自动化 Benchmark 跑分框架，让你真正体会到用“工程方法”调优 AI 的快感！
+这就是顶级驾驭工程与其他开源玩具的最核心区别：建立可被科学量化的自动评估体系（Benchmark & Evaluation）。今天，我们将通过纯 Python 语言，构建一个极其硬核但又极其简单的自动化 Benchmark 跑分框架，让你真正体会到用”工程方法”调优 AI 的快感！
 
 ## 如何评估一个 Agent 的好坏？
 
@@ -26,9 +26,9 @@ Agent 提交的不是一段描述，而是一个可以被直接应用的 git pat
 
 准备靶机（Testbed）：提供一个有明确 Bug 的代码库。
 
-设定指令（Prompt）：告诉 Agent 有什么现象（比如运行 main.go 时抛出了空指针异常），让 Agent 自己去改。
+设定指令（Prompt）：告诉 Agent 有什么现象（比如运行 main.py 时抛出了空指针异常），让 Agent 自己去改。
 
-客观断言（Assertion）：Agent 说自己改好了不算数。我们通过执行一段验证脚本（比如 go test），来判断 Agent 是否真的让原本失败的测试变为通过，且没有破坏其他测试——这正是 SWE-bench Fail-to-Pass 范式的精髓。
+客观断言（Assertion）：Agent 说自己改好了不算数。我们通过执行一段验证脚本（比如 unittest），来判断 Agent 是否真的让原本失败的测试变为通过，且没有破坏其他测试——这正是 SWE-bench Fail-to-Pass 范式的精髓。
 
 计算综合得分：结合我们在第 18、19 讲收集到的成本（Cost）、耗时（Duration）和轮数（Turns），给这次任务打一个综合分数。
 
@@ -36,7 +36,7 @@ Agent 提交的不是一段描述，而是一个可以被直接应用的 git pat
 
 ![](img/20_02.webp)
 
-通过这套自动化的跑分流水线，当你未来修改了任何引擎底层的提示词或压缩逻辑后，你只需要运行一次 go run cmd/bench/main.go。几分钟后，你就能拿到一份客观的数据报告，用数字决定架构的演进方向。
+通过这套自动化的跑分流水线，当你未来修改了任何引擎底层的提示词或压缩逻辑后，你只需要运行一次 python cmd/bench/main.py。几分钟后，你就能拿到一份客观的数据报告，用数字决定架构的演进方向。
 
 ## 业界前沿：AI Agent 评估方法论全景
 
@@ -66,7 +66,7 @@ Agent-as-Judge 框架则将这一思路延伸到了自主 Agent 领域。它提�
 
 与 CI/CD 流水线集成
 
-将评估嵌入 CI/CD 流水线，已经成为让 Agent 真正走向生产可信的基础设施。每一次 Prompt 模板变更、工具函数修改或模型版本升级，都自动触发一次 Benchmark 跑分，并对比历史基线，才能真正做到"每次改动心中有数"。这也正是我们本讲要为 go-tiny-claw 构建自动化评估脚本的核心工程意义所在。
+将评估嵌入 CI/CD 流水线，已经成为让 Agent 真正走向生产可信的基础设施。每一次 Prompt 模板变更、工具函数修改或模型版本升级，都自动触发一次 Benchmark 跑分，并对比历史基线，才能真正做到"每次改动心中有数"。这也正是我们本讲要为 tiny-claw 构建自动化评估脚本的核心工程意义所在。
 
 接下来，我们就来看看如何构建这套自动化的跑分流水线吧！
 
@@ -74,18 +74,18 @@ Agent-as-Judge 框架则将这一思路延伸到了自主 Agent 领域。它提�
 
 ### 目录结构回顾与更新
 
-我们在本讲将引入一个全新的、处于系统最上层的包：internal/eval（自动化评估模块），新增 internal/eval/benchmark.go 来封装评估逻辑。它负责调度 engine 和 tools，并利用 observability 进行度量，它是我们测试框架的绝对中枢。同时新增一个入口 cmd/bench/main.go。
+我们在本讲将引入一个全新的、处于系统最上层的包：internal/eval（自动化评估模块），新增 internal/eval/benchmark.py 来封装评估逻辑。它负责调度 engine 和 tools，并利用 observability 进行度量，它是我们测试框架的绝对中枢。同时新增一个入口 cmd/bench/main.py。
 ```
-go-tiny-claw/
+tiny-claw/
 ├── cmd/
 │   ├── claw/
-│   │   └── main.go              # CLI 入口 (保持不变)
+│   │   └── main.py              # CLI 入口 (保持不变)
 │   └── bench/
-│       └── main.go              #【新增】自动化跑分入口！
+│       └── main.py              #【新增】自动化跑分入口！
 ├── internal/
 │   ├── observability/           # 保持不变
 │   ├── eval/                    #【新增】顶层测试评估模块
-│   │   └── benchmark.go         #【新增】跑分核心逻辑
+│   │   └── benchmark.py         #【新增】跑分核心逻辑
 │   ├── engine/                  # 保持不变
 │   ├── tools/                   # 保持不变
 │   ├── feishu/                  # 保持不变
@@ -93,51 +93,54 @@ go-tiny-claw/
 │   ├── tools/                   # 保持不变
 │   ├── provider/                # 保持不变
 │   └── schema/                  # 保持不变
-├── go.mod
-└── go.sum
 ```
 
 ### 第 1 步：定义评测用例（TestCase）数据结构
 
-在 internal/eval/benchmark.go 中，我们首先定义什么是“一个测试任务”。
-```
-// internal/eval/benchmark.go
-package observability
+在 internal/eval/benchmark.py 中，我们首先定义什么是”一个测试任务”。
+```python
+# internal/eval/benchmark.py
+from __future__ import annotations
 
-import (
- "context"
- "fmt"
- "log"
- "os"
- "os/exec"
- "time"
+import logging
+import os
+import subprocess
+import time
+from dataclasses import dataclass
+from pathlib import Path
 
-    ctxpkg "github.com/yourname/go-tiny-claw/internal/context"
- "github.com/yourname/go-tiny-claw/internal/engine"
- "github.com/yourname/go-tiny-claw/internal/observability"
- "github.com/yourname/go-tiny-claw/internal/provider"
- "github.com/yourname/go-tiny-claw/internal/schema"
- "github.com/yourname/go-tiny-claw/internal/tools"
-)
+from ..engine.loop import AgentEngine
+from ..engine.session import Session, new_session
+from ..observability.tracker import new_cost_tracker
+from ..provider.openai import new_zhipu_openai_provider
+from ..tools.Bash import new_bash_tool
+from ..tools.edit_file import new_edit_file_tool
+from ..tools.readfile import new_read_file_tool
+from ..tools.registry import new_registry
+from ..tools.write import new_write_file_tool
 
-// TestCase 定义了一个需要 Agent 去完成并验证的独立任务
-type TestCase struct {
-    ID             string // 用例唯一标识
-    Name           string // 用例名称
-    SetupScript    string // 【可选】在 Agent 运行前执行的 bash 脚本 (用于初始化靶机代码)
-    TaskPrompt     string // 发送给 Agent 的任务指令
-    ValidateScript string // 【核心】在 Agent 运行结束后执行的 bash 校验脚本。exit 0 视为成功，其他视为失败
-    MaxTurns       int // 允许 Agent 尝试的最大轮数 (超时算失败)
-}
 
-// TestResult 存放单次跑分结果
-type TestResult struct {
-    TestCaseID   string
-    Passed       bool
-    TotalCostUSD float64
-    DurationMs   int64
-    ErrorMsg     string
-}
+@dataclass(slots=True)
+class TestCase:
+    """定义一个需要 Agent 去完成并验证的独立任务。"""
+
+    id: str                          # 用例唯一标识
+    name: str                        # 用例名称
+    setup_script: str = ""           # 【可选】在 Agent 运行前执行的 bash 脚本 (用于初始化靶机代码)
+    task_prompt: str = ""            # 发送给 Agent 的任务指令
+    validate_script: str = ""        # 【核心】在 Agent 运行结束后执行的 bash 校验脚本。exit 0 视为成功，其他视为失败
+    max_turns: int = 0               # 允许 Agent 尝试的最大轮数 (超时算失败)
+
+
+@dataclass(slots=True)
+class TestResult:
+    """存放单次跑分结果。"""
+
+    test_case_id: str
+    passed: bool
+    total_cost_cny: float = 0.0
+    duration_ms: int = 0
+    error_msg: str = ""
 ```
 
 注意 ValidateScript，这是我们摆脱“玄学评估”的锚点。Agent 吹得再天花乱坠没用，只要跑不过我们预先写好的 bash 验证脚本（比如去检测某个文件里是否包含了特定的字符串，或者单元测试是否通过），它就是 0 分。
@@ -145,181 +148,261 @@ type TestResult struct {
 ### 第 2 步：实现 Benchmark Runner（跑分执行器）
 
 接下来，我们编写执行器。它将遍历所有的 TestCase，为每一个用例分配一个干净的工作区和被 CostTracker 包裹的大脑，然后启动 Agent。
-```
-// internal/eval/benchmark.go (续)
+```python
+# internal/eval/benchmark.py (续)
 
-type BenchmarkRunner struct {
-    modelName string
-}
+class BenchmarkRunner:
+    def __init__(self, model_name: str) -> None:
+        self.model_name = model_name
 
-func NewBenchmarkRunner(model string) *BenchmarkRunner {
- return &BenchmarkRunner{modelName: model}
-}
+    def run_suite(self, testcases: list[TestCase]) -> list[TestResult]:
+        """执行一组评测集，并返回跑分报告。"""
+        logging.info("==================================================")
+        logging.info("启动自动化 Harness Benchmark 评估... | 模型: %s", self.model_name)
+        logging.info("==================================================")
 
-// RunSuite 执行一组评测集，并返回跑分报告
-func (b *BenchmarkRunner) RunSuite(ctx context.Context, testcases []TestCase) {
-    log.Println("==================================================")
-    log.Printf("🚀 启动自动化 Harness Benchmark 评估... | 模型: %s\n", b.modelName)
-    log.Println("==================================================")
+        results: list[TestResult] = []
+        passed_count = 0
+        total_cost = 0.0
 
- var results []TestResult
-    passedCount := 0
-    totalCost := 0.0
+        for test_case in testcases:
+            logging.info("\n>>> 正在执行用例 [%s]: %s", test_case.id, test_case.name)
 
- for _, tc := range testcases {
-        log.Printf("\n>>> ⏳ 正在执行用例 [%s]: %s\n", tc.ID, tc.Name)
+            result = self._run_single_test(test_case)
+            results.append(result)
 
-        res := b.runSingleTest(ctx, tc)
-        results = append(results, res)
+            if result.passed:
+                passed_count += 1
+                logging.info(
+                    ">>> 用例 [%s] 测试通过! | 耗时: %dms | 花费: $%.6f",
+                    test_case.id, result.duration_ms, result.total_cost_cny,
+                )
+            else:
+                logging.error(
+                    ">>> 用例 [%s] 测试失败! | 错误: %s",
+                    test_case.id, result.error_msg,
+                )
 
- if res.Passed {
-            passedCount++
-            log.Printf(">>> ✅ 用例 [%s] 测试通过! | 耗时: %dms | 花费: $%.6f\n", tc.ID, res.DurationMs, res.TotalCostCNY)
-        } else {
-            log.Printf(">>> ❌ 用例 [%s] 测试失败! | 错误: %s\n", tc.ID, res.ErrorMsg)
-        }
-        totalCost += res.TotalCostCNY
-    }
+            total_cost += result.total_cost_cny
 
- // 打印终极报表
-    log.Println("\n================ 🏆 跑分终极报告 ================")
-    log.Printf("总用例数: %d | 成功数: %d | 成功率: %.2f%%\n", len(testcases), passedCount, float64(passedCount)/float64(len(testcases))*100)
-    log.Printf("总消耗成本: $%.6f\n", totalCost)
-    log.Println("==================================================")
-}
+        # 打印终极报表
+        success_rate = passed_count / len(testcases) * 100 if testcases else 0.0
+        logging.info("\n================ 跑分终极报告 ================")
+        logging.info(
+            "总用例数: %d | 成功数: %d | 成功率: %.2f%%",
+            len(testcases), passed_count, success_rate,
+        )
+        logging.info("总消耗成本: $%.6f", total_cost)
+        logging.info("==================================================")
+        return results
 
-func (b *BenchmarkRunner) runSingleTest(ctx context.Context, tc TestCase) TestResult {
-    startTime := time.Now()
+    def _run_single_test(self, test_case: TestCase) -> TestResult:
+        start_time = time.perf_counter()
 
- // 1. 为每个用例创建一个绝对干净的沙箱目录 (物理隔离)
-    workDir, _ := os.Getwd()
-    workDir += fmt.Sprintf("/workspace/%s_%d", tc.ID, time.Now().Unix())
-    _ = os.MkdirAll(workDir, 0755)
+        # 1. 为每个用例创建一个绝对干净的沙箱目录 (物理隔离)
+        work_dir = self._prepare_work_dir(test_case.id)
 
- // 2. (可选) 执行 Setup 脚本准备靶机代码
- if tc.SetupScript != "" {
-        cmd := exec.Command("bash", "-c", tc.SetupScript)
-        cmd.Dir = workDir
- if err := cmd.Run(); err != nil {
- return TestResult{TestCaseID: tc.ID, Passed: false, ErrorMsg: "靶机 Setup 失败"}
-        }
-    }
+        # 2. (可选) 执行 Setup 脚本准备靶机代码
+        if test_case.setup_script:
+            setup_result = self._run_bash_script(test_case.setup_script, cwd=work_dir)
+            if setup_result.returncode != 0:
+                return TestResult(
+                    test_case_id=test_case.id,
+                    passed=False,
+                    error_msg="靶机 Setup 失败",
+                    duration_ms=self._elapsed_ms(start_time),
+                )
 
- // 3. 组装具备打点能力 (Tracker) 的引擎
-    realProvider := provider.NewZhipuOpenAIProvider(b.modelName) // 使用真实的 GLM API
-    session := ctxpkg.NewSession(tc.ID, workDir)                 // 为本次跑分单独建一个 Session 记账
-    trackedProvider := observability.NewCostTracker(realProvider, b.modelName, session)
+        # 3. 组装具备打点能力 (Tracker) 的引擎
+        session = new_session(test_case.id, str(work_dir))  # 为本次跑分单独建一个 Session 记账
+        engine = self._build_engine(str(work_dir), session)
 
-    registry := tools.NewRegistry()
-    registry.Register(tools.NewReadFileTool(workDir))
-    registry.Register(tools.NewWriteFileTool(workDir))
-    registry.Register(tools.NewBashTool(workDir))
-    registry.Register(tools.NewEditFileTool(workDir))
+        # 4. 让 Agent 开始干活
+        # 我们传入 None 作为 reporter 屏蔽普通日志，防止刷屏
+        err = engine.run(test_case.task_prompt, session=session, reporter=None)
 
-    eng := engine.NewAgentEngine(trackedProvider, registry, false, false)
+        if err is not None:
+            return TestResult(
+                test_case_id=test_case.id,
+                passed=False,
+                total_cost_cny=session.total_cost_cny,
+                duration_ms=self._elapsed_ms(start_time),
+                error_msg=f"Agent 崩溃: {err}",
+            )
 
- // 4. 让 Agent 开始干活
-    session.Append(schema.Message{Role: schema.RoleUser, Content: tc.TaskPrompt})
- // 我们传入一个空的 reporter 屏蔽普通日志，防止刷屏
-    err := eng.Run(ctx, session, nil)
+        # 5. 【核心断言】Agent 跑完了，我们来验收成果！
+        validate_result = self._run_bash_script(test_case.validate_script, cwd=work_dir)
+        duration_ms = self._elapsed_ms(start_time)
 
- if err != nil {
- return TestResult{TestCaseID: tc.ID, Passed: false, ErrorMsg: fmt.Sprintf("Agent 崩溃: %v", err)}
-    }
+        if validate_result.returncode != 0:
+            output = self._combined_output(validate_result)
+            return TestResult(
+                test_case_id=test_case.id,
+                passed=False,
+                total_cost_cny=session.total_cost_cny,
+                duration_ms=duration_ms,
+                error_msg=f"验证脚本执行失败: {output}",
+            )
 
- // 5. 【核心断言】Agent 跑完了，我们来验收成果！
-    cmd := exec.Command("bash", "-c", tc.ValidateScript)
-    cmd.Dir = workDir
-    out, err := cmd.CombinedOutput()
+        return TestResult(
+            test_case_id=test_case.id,
+            passed=True,
+            total_cost_cny=session.total_cost_cny,
+            duration_ms=duration_ms,
+        )
 
-    duration := time.Since(startTime).Milliseconds()
+    def _build_engine(self, work_dir: str, session: Session) -> AgentEngine:
+        """组装具备打点能力的引擎。"""
+        real_provider = new_zhipu_openai_provider(self.model_name)  # 使用真实的 GLM API
+        tracked_provider = new_cost_tracker(real_provider, self.model_name, session)
 
- if err != nil {
- return TestResult{
-            TestCaseID:   tc.ID,
-            Passed:       false,
-            TotalCostCNY: session.TotalCostCNY,
-            DurationMs:   duration,
-            ErrorMsg:     fmt.Sprintf("验证脚本执行失败: %s", string(out)),
-        }
-    }
+        registry = new_registry()
+        registry.register(new_read_file_tool(work_dir))
+        registry.register(new_write_file_tool(work_dir))
+        registry.register(new_bash_tool(work_dir))
+        registry.register(new_edit_file_tool(work_dir))
 
- return TestResult{
-        TestCaseID:   tc.ID,
-        Passed:       true,
-        TotalCostCNY: session.TotalCostCNY,
-        DurationMs:   duration,
-    }
-}
+        return AgentEngine(
+            provider=tracked_provider,
+            registry=registry,
+            enable_thinking=False,
+            PlanMode=False,
+        )
+
+    def _prepare_work_dir(self, test_case_id: str) -> Path:
+        """为每个用例创建一个绝对干净的沙箱目录。"""
+        workspace_root = Path(os.getcwd()) / "workspace"
+        work_dir = workspace_root / f"{test_case_id}_{time.time_ns()}"
+        work_dir.mkdir(parents=True, exist_ok=True)
+        return work_dir
+
+    def _run_bash_script(self, script: str, cwd: Path) -> subprocess.CompletedProcess[bytes]:
+        """执行 bash 脚本并返回结果。"""
+        try:
+            return subprocess.run(
+                ["bash", "-lc", script],
+                cwd=str(cwd),
+                capture_output=True,
+                text=False,
+                check=False,
+            )
+        except OSError as exc:
+            return subprocess.CompletedProcess(
+                args=["bash", "-lc", script],
+                returncode=1,
+                stdout=b"",
+                stderr=str(exc).encode("utf-8", errors="replace"),
+            )
+
+    def _combined_output(self, result: subprocess.CompletedProcess[bytes]) -> str:
+        """合并 stdout 和 stderr 输出。"""
+        stdout = result.stdout.decode("utf-8", errors="replace") if result.stdout else ""
+        stderr = result.stderr.decode("utf-8", errors="replace") if result.stderr else ""
+        output = f"{stdout}{stderr}".strip()
+        return output or "无终端输出"
+
+    def _elapsed_ms(self, start_time: float) -> int:
+        """计算从 start_time 到现在的毫秒数。"""
+        return int((time.perf_counter() - start_time) * 1000)
+
+    RunSuite = run_suite  # PascalCase 别名，兼容 Go 风格
+
+
+def new_benchmark_runner(model: str) -> BenchmarkRunner:
+    """创建 BenchmarkRunner 实例的工厂函数。"""
+    return BenchmarkRunner(model_name=model)
+
+
+# PascalCase 别名，兼容 Go 风格
+NewBenchmarkRunner = new_benchmark_runner
 ```
 
 注意到了吗？我们通过代码在机器里构建了一个“考试环境”！每次测试，它都会在一个全新的、隔离的 workspace/xxx 目录下进行。这保证了每一次跑分都是完全客观、互不干扰的。
 
-## 运行与实战测试：给 go-tiny-claw 安排一场期末考试
+## 运行与实战测试：给 tiny-claw 安排一场期末考试
 
-引擎搭好了，现在我们要写一套评测集（Testsuite）。打开 cmd/bench/main.go。在这里，我们将编写两个极其经典的软件工程测试题：
+引擎搭好了，现在我们要写一套评测集（Testsuite）。打开 cmd/bench/main.py。在这里，我们将编写两个极其经典的软件工程测试题：
 
 文本替换题：考察 Agent 的 edit_file 工具是否稳定。
 
 代码分析与生成题：考察 Agent 是否能读懂代码并按要求创建新文件。
-```
-// cmd/bench/main.go
-package main
+```python
+# cmd/bench/main.py
+import os
+import sys
 
-import (
- "context"
- "log"
- "os"
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.abspath(os.path.join(CURRENT_DIR, "../.."))
+CLAW_CMD_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "../claw"))
 
- "github.com/yourname/go-tiny-claw/internal/eval"
-)
+for path in (PROJECT_ROOT, CLAW_CMD_DIR):
+    if path not in sys.path:
+        sys.path.insert(0, path)
 
-func main() {
- if os.Getenv("ZHIPU_API_KEY") == "" {
-        log.Fatal("请先导出 ZHIPU_API_KEY 环境变量进行跑分测试")
-    }
+from common import configure_logging, require_env_vars
+from internal.eval.benchmark import TestCase, new_benchmark_runner
 
- // 构建一套微型评测集
-    testcases := []eval.TestCase{
-        {
-            ID:   "test_001_edit",
-            Name: "测试模糊替换工具的准确性",
- // 准备靶机：生成一个有错误的 json 文件
-            SetupScript: `echo '{"name": "tiny-claw", "version": "v1.0.0"}' > config.json`,
- // 考题：要求修改版本号
-            TaskPrompt: `当前目录下有一个 config.json。请你使用 edit_file 工具，将其中的 version 从 v1.0.0 改为 v2.0.0。不要做其他多余操作。`,
- // 判卷脚本：使用 grep 检查文件是否包含 v2.0.0
-            ValidateScript: `grep '"version": "v2.0.0"' config.json`,
-        },
-        {
-            ID:   "test_002_code_gen",
-            Name: "测试代码阅读与创建新文件的综合能力",
- // 准备靶机：生成一个简单的乘法函数
-            SetupScript: `echo 'package math\n\nfunc Multiply(a, b int) int {\n\treturn a * b\n}' > math.go`,
- // 考题：要求 Agent 根据刚才的代码，自己去写一份单元测试
-            TaskPrompt: `当前目录下有一个 math.go。请你仔细阅读它，然后在同级目录下，帮我写一个规范的单元测试文件 math_test.go，用来测试 Multiply 函数。请务必包含正常的测试用例。`,
- // 判卷脚本：直接运行 go test！如果不通过则直接 0 分。
-            ValidateScript: `go mod init bench && go test -v ./...`,
-        },
-    }
 
- // 启动跑分执行器！
- // 我们选用国内极其廉价但能力不错的 glm-4.5-air 跑分，省点钱。
-    runner := eval.NewBenchmarkRunner("glm-4.5-air")
-    runner.RunSuite(context.Background(), testcases)
-}
+def main() -> None:
+    configure_logging()
+    require_env_vars(("ZHIPU_API_KEY",))
+
+    # 构建一套微型评测集
+    testcases = [
+        TestCase(
+            id="test_001_edit",
+            name="测试模糊替换工具的准确性",
+            # 准备靶机：生成一个有错误的 json 文件
+            setup_script="""echo '{"name": "tiny-claw", "version": "v1.0.0"}' > config.json""",
+            # 考题：要求修改版本号
+            task_prompt=(
+                "当前目录下有一个 config.json。请你使用 edit_file 工具，"
+                "将其中的 version 从 v1.0.0 改为 v2.0.0。不要做其他多余操作。"
+            ),
+            # 判卷脚本：使用 grep 检查文件是否包含 v2.0.0
+            validate_script="""grep '"version": "v2.0.0"' config.json""",
+        ),
+        TestCase(
+            id="test_002_code_gen",
+            name="测试代码阅读与创建新文件的综合能力",
+            # 准备靶机：生成一个简单的乘法函数
+            setup_script=(
+                "cat <<'EOF' > calculator.py\n"
+                "def multiply(a, b):\n"
+                "    return a * b\n"
+                "EOF"
+            ),
+            # 考题：要求 Agent 根据刚才的代码，自己去写一份单元测试
+            task_prompt=(
+                "当前目录下有一个 calculator.py。请你仔细阅读它，然后在同级目录下，"
+                "帮我写一个规范的单元测试文件 test_calculator.py，用来测试 multiply 函数。"
+                "测试时用python3运行。请务必包含正常的测试用例。"
+            ),
+            # 判卷脚本：直接运行单元测试！如果不通过则直接 0 分。
+            validate_script="python3 -m unittest -v",
+        ),
+    ]
+
+    # 启动跑分执行器！
+    # 我们选用性价比不错的 xiaomi/mimo-v2.5 跑分。
+    runner = new_benchmark_runner("xiaomi/mimo-v2.5")
+    runner.run_suite(testcases)
+
+
+if __name__ == "__main__":
+    main()
 ```
 
 ### 见证“数据驱动”的奇迹时刻
 
 在终端中执行启动命令：
 ```
-go run cmd/bench/main.go
+python cmd/bench/main.py
 ```
 
-喝口水，静静地看着终端里的进度日志。整个评测过程中，所有的闲杂日志都被我们屏蔽了，你看到的将是“裁判视角”的裁决：
+喝口水，静静地看着终端里的进度日志。整个评测过程中，所有的闲杂日志都被我们屏蔽了，你看到的将是”裁判视角”的裁决：
 ```
-$go run cmd/bench/main.go 
+$ python cmd/bench/main.py
 2026/05/01 20:19:12 ==================================================
 2026/05/01 20:19:12 🚀 启动自动化 Harness Benchmark 评估... | 模型: glm-4.5-air
 2026/05/01 20:19:12 ==================================================
@@ -329,7 +412,7 @@ $go run cmd/bench/main.go
 2026/05/01 20:19:12 [Registry] 成功挂载工具: write_file
 2026/05/01 20:19:12 [Registry] 成功挂载工具: bash
 2026/05/01 20:19:12 [Registry] 成功挂载工具: edit_file
-2026/05/01 20:19:12 [Engine] 唤醒会话 [test_001_edit]，锁定工作区: build-agent-harness-from-scratch/part5/source/ch20/go-tiny-claw/workspace/test_001_edit_1777616352 (PlanMode: false)
+2026/05/01 20:19:12 [Engine] 唤醒会话 [test_001_edit]，锁定工作区: tiny-claw/workspace/test_001_edit_1777616352 (PlanMode: false)
 2026/05/01 14:19:17 [Tracker] 📊 API 调用完成 | 耗时: 5.313421502s | 输入: 750 tk | 输出: 103 tk | 花费: ¥0.000128
 2026/05/01 14:19:17 [Tracker] 💰 当前会话 (test_001_edit) 累计花费: ¥0.000128
 2026/05/01 14:19:19 [Tracker] 📊 API 调用完成 | 耗时: 2.035826774s | 输入: 815 tk | 输出: 146 tk | 花费: ¥0.000144
@@ -344,7 +427,7 @@ $go run cmd/bench/main.go
 2026/05/01 14:19:22 [Registry] 成功挂载工具: write_file
 2026/05/01 14:19:22 [Registry] 成功挂载工具: bash
 2026/05/01 14:19:22 [Registry] 成功挂载工具: edit_file
-2026/05/01 14:19:22 [Engine] 唤醒会话 [test_002_code_gen]，锁定工作区: build-agent-harness-from-scratch/part5/source/ch20/go-tiny-claw/workspace/test_002_code_gen_1777616362 (PlanMode: false)
+2026/05/01 14:19:22 [Engine] 唤醒会话 [test_002_code_gen]，锁定工作区: tiny-claw/workspace/test_002_code_gen_1777616362 (PlanMode: false)
 2026/05/01 14:19:24 [Tracker] 📊 API 调用完成 | 耗时: 2.294828181s | 输入: 751 tk | 输出: 118 tk | 花费: ¥0.000130
 2026/05/01 14:19:24 [Tracker] 💰 当前会话 (test_002_code_gen) 累计花费: ¥0.000130
 2026/05/01 14:19:31 [Tracker] 📊 API 调用完成 | 耗时: 6.185434483s | 输入: 816 tk | 输出: 571 tk | 花费: ¥0.000208
@@ -374,9 +457,9 @@ $go run cmd/bench/main.go
 2026/05/01 14:19:48 ==================================================
 ```
 
-漂亮！在这个短短的几十秒钟内，go-tiny-claw 分别在两个完全隔离的沙箱目录下，自主探索并成功完成了 JSON 修改和 Go 单元测试的编写。
+漂亮！在这个短短的几十秒钟内，tiny-claw 分别在两个完全隔离的沙箱目录下，自主探索并成功完成了 JSON 修改和 Python 单元测试的编写。
 
-更重要的是，这两次成功不是它自己吹的，而是被严格的 grep 和 go test 脚本硬性校验通过的！并且，这略复杂的两个动作，只花了很少的的成本。
+更重要的是，这两次成功不是它自己吹的，而是被严格的 grep 和 unittest 脚本硬性校验通过的！并且，这略复杂的两个动作，只花了很少的的成本。
 
 ## 本讲小结
 
@@ -384,7 +467,7 @@ $go run cmd/bench/main.go
 
 从“玄学”到“工程学”：我们不再依靠在对话框里凭感觉测试 Agent。通过构建自动化的 Benchmark 跑分框架，我们把大模型这种充满概率的黑盒，拉入了软件工程的确定性范畴。
 
-Test-Driven Evaluation（测试驱动评估）：在编写 TestCase 时，我们通过注入 SetupScript 初始化靶机状态，通过 ValidateScript (如 go test) 执行硬核验收。这排除了大模型擅长“花言巧语伪装”的幻觉干扰，只看最终物理世界是否被正确改变。
+Test-Driven Evaluation（测试驱动评估）：在编写 TestCase 时，我们通过注入 SetupScript 初始化靶机状态，通过 ValidateScript (如 unittest) 执行硬核验收。这排除了大模型擅长”花言巧语伪装”的幻觉干扰，只看最终物理世界是否被正确改变。
 
 驱动底层架构进化：有了这个跑分框架后。以后你再想修改第 12 讲里的 Compactor 阈值，或者修改第 7 讲的 Fuzzy Edit 正则算法。你只需要跑一次 Benchmark。如果成功率从 100% 掉到了 50%，那就说明你的代码改烂了，立刻回滚！数据驱动，这才是顶级架构师底气十足的原因。
 
@@ -398,10 +481,10 @@ Test-Driven Evaluation（测试驱动评估）：在编写 TestCase 时，我们
 
 ## 思考题
 
-在当前的 Benchmark Runner 中，如果某个任务非常复杂（例如：重构 10 个代码文件），大模型在我们的 go-tiny-claw 引擎中可能会发生 20 个 Turn 的循环交互，然后才完成任务。如果在这期间，它有一次 bash 敲错了命令（比如漏了一个路径斜杠），触发了底层报错。但得益于我们在第 14 讲中写的 Error Recovery 机制，它在下一轮自己纠正了错误，并最终通过了 ValidateScript。
+在当前的 Benchmark Runner 中，如果某个任务非常复杂（例如：重构 10 个代码文件），大模型在我们的 tiny-claw 引擎中可能会发生 20 个 Turn 的循环交互，然后才完成任务。如果在这期间，它有一次 bash 敲错了命令（比如漏了一个路径斜杠），触发了底层报错。但得益于我们在第 14 讲中写的 Error Recovery 机制，它在下一轮自己纠正了错误，并最终通过了 ValidateScript。
 
 对于这种“中途摔了一跤，但最终依然完成任务”的情况，我们目前的计分板只是简单地标记为 Passed: true。但在极其苛刻的性能调优（Performance Tuning）中，“一发入魂完成”和“重试了 5 次才完成”，其对系统架构（Prompt、工具设计）好坏的评判价值是完全不同的。
 
-基于我们之前在第 18 讲（Cost Tracker）和第 19 讲（Tracing 链路追踪）中沉淀的数据收集能力，如果让你在跑分的 TestResult 结构体中，增加两个能够精准度量这种“试错成本”或“驾驭顺滑度”的新指标，你会添加哪两个关键指标？为什么？
+基于我们之前在第 18 讲（Cost Tracker）和第 19 讲（Tracing 链路追踪）中沉淀的数据收集能力，如果让你在跑分的 TestResult 数据类中，增加两个能够精准度量这种”试错成本”或”驾驭顺滑度”的新指标，你会添加哪两个关键指标？为什么？
 
 欢迎在留言区分享你的高阶数据分析思路。我们下一讲，开启最终的实战串讲！
